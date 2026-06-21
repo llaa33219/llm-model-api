@@ -52,8 +52,14 @@ curl 'https://lma.blp.sh/model?model-name=openai-gpt-5'
 # Whitespace + separator-insensitive
 curl 'https://lma.blp.sh/model?model-name=claude%20opus%204%205'
 
+# Token order does not matter — same model, different arrangement
+curl 'https://lma.blp.sh/model?model-name=claude-4-5-opus'
+curl 'https://lma.blp.sh/model?model-name=sonnet-3.5-claude'
+
 # These will NOT match gpt-5 (404):
 #   ?model-name=gpt-5.1    ?model-name=gpt-5.5    ?model-name=gpt-5-mini    ?model-name=gpt-4o
+#   ?model-name=claude%20opus    (too short — drops the version tokens)
+#   ?model-name=openai%2Fclaude-opus-4-5  (OpenAI has no claude — split rejects)
 
 # Cache diagnostics
 curl https://lma.blp.sh/cache-status
@@ -76,13 +82,14 @@ Forgiving fuzzy match. Normalize, score, return the best candidate ≥70%.
 
 ### Model matching (`/model?model-name=`)
 
-**Strict exact match only** after normalization. No fuzzy, no substring, no edit distance. The `match_type` field on each result tells you which of three paths matched:
+**Strict exact match only** after normalization. No fuzzy, no substring, no edit distance. The `match_type` field on each result tells you which of four paths matched:
 
 | `match_type` | Form | Example input | Example match |
 |---|---|---|---|
 | `exact` | Full input equals a normalized `model.id` or `model.name` | `gpt-5`, `gpt 5`, `GPT-5`, `gpt5`, `claude opus 4 5` | `gpt-5`, `claude-opus-4-5` |
 | `split` | Input contains `/`; both halves exactly match a known provider and a model identifier | `openai/gpt-5`, `Anthropic/claude-opus-4-5` | OpenAI / `gpt-5` |
 | `prefix` | Input begins with a known provider's normalized name/id; remainder is a model identifier | `openai-gpt-5`, `anthropic-claude-opus-4-5` | OpenAI / `gpt-5` |
+| `permutation` | Input has the same letter-runs and digit-runs (in any order) as `model.id` or `model.name` | `claude-4-5-opus`, `sonnet-3.5-claude`, `opus 4.5 claude` | `claude-opus-4-5`, `claude-3-5-sonnet` |
 
 **Will NOT match** (these are blocked on purpose):
 - `gpt-5.1`, `gpt-5.5`, `gpt-5-mini` — distinct models

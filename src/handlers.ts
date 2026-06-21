@@ -117,14 +117,19 @@ export function handleModelList(
  * distinct models and must never collapse.
  *
  * Three match paths, in priority order:
- *   1. `exact`     — full input equals normalized model.id or model.name
- *   2. `split`     — input contains `/`; both halves equal a known provider
- *                    and a model identifier
- *   3. `prefix`    — input begins with a known provider's normalized name/id;
- *                    the remainder equals a model identifier
+ *   1. `exact`      — full input equals normalized model.id or model.name
+ *   2. `split`      — input contains `/`; both halves equal a known provider
+ *                     and a model identifier
+ *   3. `prefix`     — input begins with a known provider's normalized name/id;
+ *                     the remainder equals a model identifier
+ *   4. `permutation`— input has the same tokens (in any order) as model.id
+ *                     or model.name, where tokens are letter-runs and digit-runs
+ *                     extracted from the normalized string
  *
  * Examples that match `gpt-5`: "gpt-5", "gpt 5", "GPT-5", "gpt5",
  *   "openai/gpt-5", "openai-gpt-5".
+ * Examples that match `claude-opus-4-5`: "claude-opus-4-5", "claude opus 4 5",
+ *   "claude-4-5-opus", "claude 4.5 opus", "openai/claude-opus-4-5".
  * Examples that do NOT match `gpt-5`: "gpt-5.1", "gpt-5.5", "gpt-5-mini",
  *   "gpt-4o".
  */
@@ -138,12 +143,13 @@ export function handleModel(
 
   const rawInput = modelNameRaw.trim();
   const normalizedInput = normalize(rawInput);
+  const inputTokens = tokenize(rawInput);
   const providerIndex = buildProviderIndex(data);
   const results: ModelMatch[] = [];
 
   for (const [providerId, provider] of Object.entries(data)) {
     for (const [modelId, model] of Object.entries(provider.models)) {
-      const matchType = matchModel(rawInput, normalizedInput, model, provider, providerIndex);
+      const matchType = matchModel(rawInput, normalizedInput, model, provider, providerIndex, inputTokens);
       if (matchType === null) continue;
 
       results.push({
@@ -174,7 +180,7 @@ export function handleModel(
     );
   }
 
-  const typePriority: Record<MatchType, number> = { exact: 0, split: 1, prefix: 2 };
+  const typePriority: Record<MatchType, number> = { exact: 0, split: 1, prefix: 2, permutation: 3 };
   results.sort(
     (a, b) =>
       typePriority[a.match_type] - typePriority[b.match_type] ||
@@ -191,7 +197,7 @@ export function handleModel(
   });
 }
 
-type MatchType = "exact" | "split" | "prefix";
+type MatchType = "exact" | "split" | "prefix" | "permutation";
 
 interface ModelMatch {
   provider: string;
@@ -216,6 +222,7 @@ function matchModel(
   model: Model,
   provider: Provider,
   providerIndex: Set<string>,
+  inputTokens: string[],
 ): MatchType | null {
   const modelIdNorm = normalize(model.id);
   const modelNameNorm = normalize(model.name);
@@ -244,7 +251,25 @@ function matchModel(
     }
   }
 
+  const modelIdTokens = tokenize(model.id);
+  const modelNameTokens = tokenize(model.name);
+  if (tokensMultisetEqual(inputTokens, modelIdTokens) || tokensMultisetEqual(inputTokens, modelNameTokens)) {
+    return "permutation";
+  }
+
   return null;
+}
+
+function tokenize(s: string): string[] {
+  const norm = normalize(s);
+  return norm.match(/[a-z]+|\d+/g) ?? [];
+}
+
+function tokensMultisetEqual(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  const sortedA = [...a].sort();
+  const sortedB = [...b].sort();
+  return sortedA.every((t, i) => t === sortedB[i]);
 }
 
 function stripKnownProviderPrefix(input: string, providerIndex: Set<string>): string | null {
