@@ -19,7 +19,7 @@ Re-shaped view of [`models.dev/api.json`](https://models.dev/api.json) deployed 
 |---|---|
 | `GET https://lma.blp.sh/provider` | Every provider's `name`, short `sdk` package name, and `api` URL. |
 | `GET https://lma.blp.sh/model-list?provider-name=<name>` | All models for one provider. Fuzzy-matches the provider name (case/whitespace-insensitive, ≥70% similarity). |
-| `GET https://lma.blp.sh/model?model-name=<name>` | Every model matching the name across **all** providers. Supports `provider/model` input syntax. Returns provider name, context window, max output tokens, input/output pricing, cache pricing, reasoning options. |
+| `GET https://lma.blp.sh/model?model-name=<name>` | Every model matching the name across **all** providers. **Strict** exact match (no fuzzy) — see [Matching rules](#matching-rules). Supports `provider/model` and `provider-model` syntax. Returns provider name, context window, max output tokens, input/output pricing, cache pricing, reasoning options. |
 | `GET https://lma.blp.sh/cache-status` | Internal cache diagnostics (age, TTL, staleness). |
 | `GET https://lma.blp.sh/` | This index. |
 
@@ -35,14 +35,25 @@ curl 'https://lma.blp.sh/model-list?provider-name=open%20ai'
 # Models for Anthropic (typo-tolerant fuzzy match)
 curl 'https://lma.blp.sh/model-list?provider-name=anthrpoic'
 
-# Find GPT-5 across every provider (returns 20+ duplicates from gateways)
+# Find GPT-5 across every provider (strict exact — returns only gpt-5, not gpt-5.1 / gpt-5.5 / gpt-5-mini)
 curl 'https://lma.blp.sh/model?model-name=gpt-5'
 
-# Provider/model syntax — restricts to a specific provider
+# Same query, different normalizations all hit gpt-5
+curl 'https://lma.blp.sh/model?model-name=GPT-5'
+curl 'https://lma.blp.sh/model?model-name=gpt%205'
+curl 'https://lma.blp.sh/model?model-name=gpt5'
+
+# Provider/model syntax
 curl 'https://lma.blp.sh/model?model-name=openai/gpt-5'
 
-# Whitespace + version-separator-insensitive
+# Provider prefix with dash also accepted
+curl 'https://lma.blp.sh/model?model-name=openai-gpt-5'
+
+# Whitespace + separator-insensitive
 curl 'https://lma.blp.sh/model?model-name=claude%20opus%204%205'
+
+# These will NOT match gpt-5 (404):
+#   ?model-name=gpt-5.1    ?model-name=gpt-5.5    ?model-name=gpt-5-mini    ?model-name=gpt-4o
 
 # Cache diagnostics
 curl https://lma.blp.sh/cache-status
@@ -50,16 +61,35 @@ curl https://lma.blp.sh/cache-status
 
 ## Matching rules
 
-- **Case-insensitive** — `GPT-5` ≡ `gpt-5`
-- **Whitespace-insensitive** — `claude opus 4 5` ≡ `claudeopus45`
-- **Separator-insensitive** — `claude-opus-4.5` ≡ `claudeopus45` (strips ` - _ .`)
-- **Substring boosting** — `gpt-5` inside `gpt-5-mini` scores `0.7 + 0.3 · lenRatio`
+The two endpoints use **different** matching strategies. Provider names are forgiving — they're display labels and you usually only need to be close. Model identifiers are load-bearing — `gpt-5`, `gpt-5.1`, `gpt-5.5`, and `gpt-5-mini` are four distinct models and must never collapse.
+
+### Provider matching (`/model-list?provider-name=`)
+
+Forgiving fuzzy match. Normalize, score, return the best candidate ≥70%.
+
+- **Case-insensitive** — `OpenAI` ≡ `openai`
+- **Whitespace-insensitive** — `GitHub Copilot` ≡ `githubcopilot`
+- **Separator-insensitive** — `ali baba cn` ≡ `alibabacn` (strips ` - _ .`)
+- **Substring boosting** — `openai` inside `openai-compatible` scores `0.7 + 0.3 · lenRatio`
 - **Edit-distance fallback** — otherwise `1 - levenshtein/maxLen`
-- **Threshold** — `0.7` (70% similarity) by default; otherwise the endpoint returns `404`
+- **Threshold** — `0.7` (70% similarity); otherwise returns `404`
 
-## Provider/model input
+### Model matching (`/model?model-name=`)
 
-`GET /model?model-name=openai/gpt-5` is parsed as `{ provider: "openai", model: "gpt-5" }`. Both halves must independently score ≥70%. Use plain `gpt-5` to search across every provider — the same underlying model can appear under OpenAI, OpenRouter, Vercel, GitHub Models, ZenMux, Requesty, and 20+ others, and all of them will be returned (sorted by match score).
+**Strict exact match only** after normalization. No fuzzy, no substring, no edit distance. The `match_type` field on each result tells you which of three paths matched:
+
+| `match_type` | Form | Example input | Example match |
+|---|---|---|---|
+| `exact` | Full input equals a normalized `model.id` or `model.name` | `gpt-5`, `gpt 5`, `GPT-5`, `gpt5`, `claude opus 4 5` | `gpt-5`, `claude-opus-4-5` |
+| `split` | Input contains `/`; both halves exactly match a known provider and a model identifier | `openai/gpt-5`, `Anthropic/claude-opus-4-5` | OpenAI / `gpt-5` |
+| `prefix` | Input begins with a known provider's normalized name/id; remainder is a model identifier | `openai-gpt-5`, `anthropic-claude-opus-4-5` | OpenAI / `gpt-5` |
+
+**Will NOT match** (these are blocked on purpose):
+- `gpt-5.1`, `gpt-5.5`, `gpt-5-mini` — distinct models
+- `gpt-4o` when searching for `gpt-5` — distinct models
+- `claudeopus` for `claude-opus-4-5` — too short, fuzzy rejected
+
+If you want a model variant, type the full id (e.g. `gpt-5.1` directly). If no model matches, the endpoint returns `404`.
 
 ## Caching
 

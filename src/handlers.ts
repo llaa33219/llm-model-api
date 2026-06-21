@@ -1,5 +1,5 @@
-import type { ModelsDevData, Model, ReasoningOption } from "./types";
-import { similarity } from "./match";
+import type { ModelsDevData, Model, Provider, ReasoningOption } from "./types";
+import { normalize, similarity } from "./match";
 
 const MATCH_THRESHOLD = 0.7;
 
@@ -106,9 +106,27 @@ export function handleModelList(
 
 /**
  * GET /model?model-name=<name>
- * Searches every provider's models. Supports `provider/model` input form.
- * The same model can appear under multiple providers (the user explicitly noted this),
- * so the response is an array sorted by best match first.
+ * Strict exact-match search across every provider's models. Matching is
+ * case-, whitespace-, and separator-insensitive after normalization. The
+ * same model can appear under multiple providers (the user explicitly noted
+ * this), so the response is an array.
+ *
+ * Why strict matching (not fuzzy): fuzzy similarity catches `gpt-5.1` when
+ * the user searches `gpt-5` because both share the prefix `gpt5`. We treat
+ * the model identifier as load-bearing — `gpt-5`, `gpt-5.1`, `gpt-5.5` are
+ * distinct models and must never collapse.
+ *
+ * Three match paths, in priority order:
+ *   1. `exact`     — full input equals normalized model.id or model.name
+ *   2. `split`     — input contains `/`; both halves equal a known provider
+ *                    and a model identifier
+ *   3. `prefix`    — input begins with a known provider's normalized name/id;
+ *                    the remainder equals a model identifier
+ *
+ * Examples that match `gpt-5`: "gpt-5", "gpt 5", "GPT-5", "gpt5",
+ *   "openai/gpt-5", "openai-gpt-5".
+ * Examples that do NOT match `gpt-5`: "gpt-5.1", "gpt-5.5", "gpt-5-mini",
+ *   "gpt-4o".
  */
 export function handleModel(
   data: ModelsDevData,
@@ -118,55 +136,52 @@ export function handleModel(
     return errorResponse("Missing required query parameter: model-name", 400);
   }
 
-  const parts = parseModelInput(modelNameRaw);
+  const rawInput = modelNameRaw.trim();
+  const normalizedInput = normalize(rawInput);
+  const providerIndex = buildProviderIndex(data);
   const results: ModelMatch[] = [];
 
   for (const [providerId, provider] of Object.entries(data)) {
     for (const [modelId, model] of Object.entries(provider.models)) {
-      const modelScore = similarity(parts.modelPart, model.id);
-      const modelNameScore = similarity(parts.modelPart, model.name);
-      const bestModelScore = Math.max(modelScore, modelNameScore);
+      const matchType = matchModel(rawInput, normalizedInput, model, provider, providerIndex);
+      if (matchType === null) continue;
 
-      let score: number;
-      if (parts.providerPart !== null) {
-        const providerIdScore = similarity(parts.providerPart, providerId);
-        const providerNameScore = similarity(parts.providerPart, provider.name);
-        const bestProviderScore = Math.max(providerIdScore, providerNameScore);
-        if (bestProviderScore < MATCH_THRESHOLD) continue;
-        score = Math.min(bestModelScore, bestProviderScore);
-      } else {
-        score = bestModelScore;
-      }
-
-      if (score >= MATCH_THRESHOLD) {
-        results.push({
-          provider: provider.name,
-          provider_id: providerId,
-          model_id: modelId,
-          model_name: model.name,
-          context_window: model.limit.context,
-          max_input_tokens: model.limit.input ?? null,
-          max_output_tokens: model.limit.output,
-          input_price: model.cost?.input ?? null,
-          output_price: model.cost?.output ?? null,
-          cache_read_price: model.cost?.cache_read ?? null,
-          cache_write_price: model.cost?.cache_write ?? null,
-          reasoning_options: model.reasoning_options ?? null,
-          reasoning: model.reasoning,
-          score: round2(score),
-        });
-      }
+      results.push({
+        provider: provider.name,
+        provider_id: providerId,
+        model_id: modelId,
+        model_name: model.name,
+        context_window: model.limit.context,
+        max_input_tokens: model.limit.input ?? null,
+        max_output_tokens: model.limit.output,
+        input_price: model.cost?.input ?? null,
+        output_price: model.cost?.output ?? null,
+        cache_read_price: model.cost?.cache_read ?? null,
+        cache_write_price: model.cost?.cache_write ?? null,
+        reasoning_options: model.reasoning_options ?? null,
+        reasoning: model.reasoning,
+        match_type: matchType,
+      });
     }
   }
 
   if (results.length === 0) {
     return errorResponse(
-      `No model matched "${modelNameRaw}" at >=${MATCH_THRESHOLD * 100}% similarity.`,
+      `No model matched "${modelNameRaw}". Model matching is strict (case/whitespace/separator-insensitive exact match only). ` +
+        `Try the provider/model form, e.g. ?model-name=openai/gpt-5. ` +
+        `Variants like ${"\"gpt-5.1\""} are distinct models and will not match ${"\"gpt-5\""}.`,
       404,
     );
   }
 
-  results.sort((a, b) => b.score - a.score);
+  const typePriority: Record<MatchType, number> = { exact: 0, split: 1, prefix: 2 };
+  results.sort(
+    (a, b) =>
+      typePriority[a.match_type] - typePriority[b.match_type] ||
+      a.provider.localeCompare(b.provider) ||
+      a.model_id.localeCompare(b.model_id),
+  );
+
   const limited = results.slice(0, 50);
   return jsonResponse({
     query: modelNameRaw,
@@ -175,6 +190,8 @@ export function handleModel(
     models: limited,
   });
 }
+
+type MatchType = "exact" | "split" | "prefix";
 
 interface ModelMatch {
   provider: string;
@@ -190,19 +207,65 @@ interface ModelMatch {
   cache_write_price: number | null;
   reasoning_options: ReasoningOption[] | null;
   reasoning: boolean;
-  score: number;
+  match_type: MatchType;
 }
 
-function parseModelInput(input: string): { providerPart: string | null; modelPart: string } {
-  const trimmed = input.trim();
-  const slashIdx = trimmed.indexOf("/");
-  if (slashIdx === -1) {
-    return { providerPart: null, modelPart: trimmed };
+function matchModel(
+  rawInput: string,
+  normalizedInput: string,
+  model: Model,
+  provider: Provider,
+  providerIndex: Set<string>,
+): MatchType | null {
+  const modelIdNorm = normalize(model.id);
+  const modelNameNorm = normalize(model.name);
+
+  if (normalizedInput === modelIdNorm || normalizedInput === modelNameNorm) {
+    return "exact";
   }
-  return {
-    providerPart: trimmed.slice(0, slashIdx).trim(),
-    modelPart: trimmed.slice(slashIdx + 1).trim(),
-  };
+
+  const slashIdx = rawInput.indexOf("/");
+  if (slashIdx > 0 && slashIdx < rawInput.length - 1) {
+    const providerPart = normalize(rawInput.slice(0, slashIdx));
+    const modelPart = normalize(rawInput.slice(slashIdx + 1));
+    const providerMatches =
+      providerPart.length > 0 &&
+      (providerPart === normalize(provider.id) || providerPart === normalize(provider.name));
+    const modelMatches = modelPart === modelIdNorm || modelPart === modelNameNorm;
+    if (providerMatches && modelMatches) {
+      return "split";
+    }
+  }
+
+  const stripped = stripKnownProviderPrefix(normalizedInput, providerIndex);
+  if (stripped !== null && stripped.length > 0) {
+    if (stripped === modelIdNorm || stripped === modelNameNorm) {
+      return "prefix";
+    }
+  }
+
+  return null;
+}
+
+function stripKnownProviderPrefix(input: string, providerIndex: Set<string>): string | null {
+  let bestLen = 0;
+  for (const key of providerIndex) {
+    if (input.startsWith(key) && key.length > bestLen) {
+      bestLen = key.length;
+    }
+  }
+  return bestLen > 0 ? input.slice(bestLen) : null;
+}
+
+function buildProviderIndex(data: ModelsDevData): Set<string> {
+  const set = new Set<string>();
+  for (const provider of Object.values(data)) {
+    const idNorm = normalize(provider.id);
+    const nameNorm = normalize(provider.name);
+    if (idNorm.length > 0) set.add(idNorm);
+    if (nameNorm.length > 0) set.add(nameNorm);
+  }
+  return set;
 }
 
 function round2(n: number): number {
