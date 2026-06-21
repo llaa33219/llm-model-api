@@ -37,7 +37,7 @@ export function handleRoot(): Response {
     description: "Re-shaped models.dev API",
     source: "https://models.dev/api.json",
     endpoints: {
-      "GET /provider": "List all providers (name, npm, api).",
+      "GET /provider": "List all providers (name, sdk, api).",
       "GET /model-list?provider-name=<name>":
         "List models for one provider. Fuzzy match (case/whitespace-insensitive, >=70% similarity).",
       "GET /model?model-name=<name>":
@@ -50,7 +50,7 @@ export function handleRoot(): Response {
 export function handleProvider(data: ModelsDevData): Response {
   const providers = Object.values(data).map((p) => ({
     name: p.name,
-    npm: stripAiSdkPrefix(p.npm),
+    sdk: stripAiSdkPrefix(p.npm),
     api: p.api ?? null,
   }));
   providers.sort((a, b) => a.name.localeCompare(b.name));

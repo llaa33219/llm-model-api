@@ -17,7 +17,7 @@ Re-shaped view of [`models.dev/api.json`](https://models.dev/api.json) deployed 
 
 | Endpoint | Returns |
 |---|---|
-| `GET https://lma.blp.sh/provider` | Every provider's `name`, short `npm` package name, and `api` URL. |
+| `GET https://lma.blp.sh/provider` | Every provider's `name`, short `sdk` package name, and `api` URL. |
 | `GET https://lma.blp.sh/model-list?provider-name=<name>` | All models for one provider. Fuzzy-matches the provider name (case/whitespace-insensitive, ≥70% similarity). |
 | `GET https://lma.blp.sh/model?model-name=<name>` | Every model matching the name across **all** providers. Supports `provider/model` input syntax. Returns provider name, context window, max output tokens, input/output pricing, cache pricing, reasoning options. |
 | `GET https://lma.blp.sh/cache-status` | Internal cache diagnostics (age, TTL, staleness). |
@@ -141,9 +141,9 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 {
   "count": 144,
   "providers": [
-    { "name": "OpenAI",    "npm": "openai",            "api": null },
-    { "name": "Anthropic", "npm": "anthropic",         "api": null },
-    { "name": "DeepSeek",  "npm": "openai-compatible", "api": "https://api.deepseek.com" }
+    { "name": "OpenAI",    "sdk": "openai",            "api": null },
+    { "name": "Anthropic", "sdk": "anthropic",         "api": null },
+    { "name": "DeepSeek",  "sdk": "openai-compatible", "api": "https://api.deepseek.com" }
   ]
 }
 ```
