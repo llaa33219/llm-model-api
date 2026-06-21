@@ -10,11 +10,15 @@
 // and "ClaudeOpus4.5" all collapse to a single comparable form.
 
 /**
- * Normalize a string for fuzzy comparison.
- * Lowercase + strip whitespace + common separators.
+ * Normalize for comparison: lowercase, treat `digit p digit` as `digit . digit`
+ * (so `k2p6` ≡ `k2.6` for model versions that use `p` for the decimal point),
+ * then strip whitespace and common separators (` - _ . /`).
  */
 export function normalize(input: string): string {
-  return input.toLowerCase().replace(/[\s\-_.]+/g, "");
+  return input
+    .toLowerCase()
+    .replace(/(\d)p(?=\d)/g, "$1.")
+    .replace(/[\s\-_.]+/g, "");
 }
 
 /**

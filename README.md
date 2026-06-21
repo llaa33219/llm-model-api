@@ -56,6 +56,10 @@ curl 'https://lma.blp.sh/model?model-name=claude%20opus%204%205'
 curl 'https://lma.blp.sh/model?model-name=claude-4-5-opus'
 curl 'https://lma.blp.sh/model?model-name=sonnet-3.5-claude'
 
+# `digit p digit` ≡ `digit . digit` (k2p6 = k2.6 decimal notation)
+curl 'https://lma.blp.sh/model?model-name=kimi%20k2p6'
+curl 'https://lma.blp.sh/model?model-name=Kimi-K2P6'
+
 # These will NOT match gpt-5 (404):
 #   ?model-name=gpt-5.1    ?model-name=gpt-5.5    ?model-name=gpt-5-mini    ?model-name=gpt-4o
 #   ?model-name=claude%20opus    (too short — drops the version tokens)
@@ -82,7 +86,13 @@ Forgiving fuzzy match. Normalize, score, return the best candidate ≥70%.
 
 ### Model matching (`/model?model-name=`)
 
-**Strict exact match only** after normalization. No fuzzy, no substring, no edit distance. The `match_type` field on each result tells you which of four paths matched:
+**Strict exact match only** after normalization. No fuzzy, no substring, no edit distance. Normalization rules:
+
+- **Case-insensitive** — `GPT-5` ≡ `gpt-5`
+- **Whitespace + separator-insensitive** — strips ` - _ . /`; `claude-opus-4-5` ≡ `claudeopus45`
+- **Decimal notation** — `digit p digit` ≡ `digit . digit`; `kimi-k2p6` ≡ `kimi-k2.6` (handles models that use `p` for the decimal point, e.g. Korean / Japanese model naming conventions)
+
+After normalization, the input is matched against every model with one of four paths:
 
 | `match_type` | Form | Example input | Example match |
 |---|---|---|---|
