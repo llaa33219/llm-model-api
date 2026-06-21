@@ -74,22 +74,18 @@ export function handleModelList(
     return errorResponse("Missing required query parameter: provider-name", 400);
   }
 
-  const providers = Object.values(data);
-  const scored = providers.map((p) => ({ provider: p, score: similarity(providerNameRaw, p.name) }));
-  scored.sort((a, b) => b.score - a.score);
-
-  if (scored.length === 0 || (scored[0]?.score ?? 0) < MATCH_THRESHOLD) {
+  const matches = findProviderMatches(data, providerNameRaw.trim(), 5);
+  if (matches.length === 0) {
     return errorResponse(
       `No provider matched "${providerNameRaw}" at >=${MATCH_THRESHOLD * 100}% similarity.`,
       404,
     );
   }
 
-  const top = scored[0]!;
-  const matches = scored
-    .filter((s) => s.score >= MATCH_THRESHOLD)
-    .slice(0, 5)
-    .map((s) => ({ name: s.provider.name, score: round2(s.score) }));
+  const top = matches[0]!;
+  const alsoMatched = matches.length > 1
+    ? matches.slice(1).map((m) => ({ name: m.provider.name, score: round2(m.score) }))
+    : undefined;
 
   const models = Object.values(top.provider.models)
     .map((m) => ({ id: m.id, name: m.name }))
@@ -98,25 +94,41 @@ export function handleModelList(
   return jsonResponse({
     provider: top.provider.name,
     score: round2(top.score),
-    alsoMatched: matches.length > 1 ? matches : undefined,
+    alsoMatched,
     modelCount: models.length,
     models,
   });
 }
 
+function findProviderMatches(
+  data: ModelsDevData,
+  query: string,
+  limit: number,
+): Array<{ provider: Provider; score: number }> {
+  const scored = Object.values(data)
+    .map((p) => ({ provider: p, score: similarity(query, p.name) }))
+    .filter((s) => s.score >= MATCH_THRESHOLD)
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, limit);
+}
+
 /**
- * GET /model?model-name=<name>
+ * GET /model?model-name=<name>[&provider-name=<name>]
  * Strict exact-match search across every provider's models. Matching is
  * case-, whitespace-, and separator-insensitive after normalization. The
  * same model can appear under multiple providers (the user explicitly noted
  * this), so the response is an array.
+ *
+ * If `provider-name` is supplied, the search is scoped to one provider
+ * (fuzzy-matched using the same rules as `/model-list`). This collapses
+ * the 20+ duplicate hits from gateways into a single result.
  *
  * Why strict matching (not fuzzy): fuzzy similarity catches `gpt-5.1` when
  * the user searches `gpt-5` because both share the prefix `gpt5`. We treat
  * the model identifier as load-bearing — `gpt-5`, `gpt-5.1`, `gpt-5.5` are
  * distinct models and must never collapse.
  *
- * Three match paths, in priority order:
+ * Four match paths, in priority order:
  *   1. `exact`      — full input equals normalized model.id or model.name
  *   2. `split`      — input contains `/`; both halves equal a known provider
  *                     and a model identifier
@@ -136,9 +148,24 @@ export function handleModelList(
 export function handleModel(
   data: ModelsDevData,
   modelNameRaw: string | null,
+  providerNameRaw: string | null,
 ): Response {
   if (modelNameRaw === null || modelNameRaw.trim() === "") {
     return errorResponse("Missing required query parameter: model-name", 400);
+  }
+
+  let scopedProvider: Provider | null = null;
+  let providerMatch: { name: string; score: number } | null = null;
+  if (providerNameRaw !== null && providerNameRaw.trim() !== "") {
+    const matches = findProviderMatches(data, providerNameRaw.trim(), 1);
+    if (matches.length === 0) {
+      return errorResponse(
+        `No provider matched "${providerNameRaw}" at >=${MATCH_THRESHOLD * 100}% similarity.`,
+        404,
+      );
+    }
+    scopedProvider = matches[0]!.provider;
+    providerMatch = { name: matches[0]!.provider.name, score: round2(matches[0]!.score) };
   }
 
   const rawInput = modelNameRaw.trim();
@@ -147,7 +174,10 @@ export function handleModel(
   const providerIndex = buildProviderIndex(data);
   const results: ModelMatch[] = [];
 
-  for (const [providerId, provider] of Object.entries(data)) {
+  const providersToScan: ReadonlyArray<readonly [string, Provider]> =
+    scopedProvider !== null ? [[scopedProvider.id, scopedProvider]] : Object.entries(data);
+
+  for (const [providerId, provider] of providersToScan) {
     for (const [modelId, model] of Object.entries(provider.models)) {
       const matchType = matchModel(rawInput, normalizedInput, model, provider, providerIndex, inputTokens);
       if (matchType === null) continue;
@@ -172,6 +202,12 @@ export function handleModel(
   }
 
   if (results.length === 0) {
+    if (scopedProvider !== null) {
+      return errorResponse(
+        `No model matched "${modelNameRaw}" in provider "${scopedProvider.name}".`,
+        404,
+      );
+    }
     return errorResponse(
       `No model matched "${modelNameRaw}". Model matching is strict (case/whitespace/separator-insensitive exact match only). ` +
         `Try the provider/model form, e.g. ?model-name=openai/gpt-5. ` +
@@ -189,12 +225,17 @@ export function handleModel(
   );
 
   const limited = results.slice(0, 50);
-  return jsonResponse({
+  const responseBody: Record<string, unknown> = {
     query: modelNameRaw,
     count: limited.length,
     totalMatches: results.length,
     models: limited,
-  });
+  };
+  if (providerMatch !== null) {
+    responseBody.provider = providerMatch.name;
+    responseBody.provider_score = providerMatch.score;
+  }
+  return jsonResponse(responseBody);
 }
 
 type MatchType = "exact" | "split" | "prefix" | "permutation";

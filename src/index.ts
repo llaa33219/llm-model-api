@@ -40,8 +40,9 @@ export default {
 
       if (path === "/model") {
         const modelName = url.searchParams.get("model-name");
+        const providerName = url.searchParams.get("provider-name");
         const data = await getData();
-        return handleModel(data, modelName);
+        return handleModel(data, modelName, providerName);
       }
 
       if (path === "/cache-status") {
