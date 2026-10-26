@@ -1,4 +1,5 @@
 import { getData, cacheStatus } from "./fetch";
+import { maybeRefreshDialects, dialectCacheStatus } from "./dialects";
 import {
   handleRoot,
   handleProvider,
@@ -7,8 +8,20 @@ import {
   handleOptions,
 } from "./handlers";
 
+/**
+ * Track a background dialect refresh. The worker runtime keeps the isolate alive
+ * via ctx.waitUntil; outside the runtime (e.g. plain node tests) we just keep the
+ * promise referenced so the microtask queue drains.
+ */
+function trackDialectRefresh(ctx: ExecutionContext, data: Awaited<ReturnType<typeof getData>>): void {
+  const promise = maybeRefreshDialects(data, cacheStatus().fetchedAt);
+  if (promise !== null) {
+    ctx.waitUntil(promise);
+  }
+}
+
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: unknown, ctx: ExecutionContext): Promise<Response> {
     if (request.method === "OPTIONS") {
       return handleOptions();
     }
@@ -29,12 +42,14 @@ export default {
 
       if (path === "/provider") {
         const data = await getData();
+        trackDialectRefresh(ctx, data);
         return handleProvider(data);
       }
 
       if (path === "/model-list") {
         const providerName = url.searchParams.get("provider-name");
         const data = await getData();
+        trackDialectRefresh(ctx, data);
         return handleModelList(data, providerName);
       }
 
@@ -42,13 +57,15 @@ export default {
         const modelName = url.searchParams.get("model-name");
         const providerName = url.searchParams.get("provider-name");
         const data = await getData();
+        trackDialectRefresh(ctx, data);
         return handleModel(data, modelName, providerName);
       }
 
       if (path === "/cache-status") {
-        return Response.json(cacheStatus(), {
-          headers: { "Access-Control-Allow-Origin": "*" },
-        });
+        return Response.json(
+          { modelsDev: cacheStatus(), dialects: dialectCacheStatus() },
+          { headers: { "Access-Control-Allow-Origin": "*" } },
+        );
       }
 
       return new Response("Not Found", { status: 404 });

@@ -63,6 +63,12 @@ export type Provider = {
   id: string;
   name: string;
   npm: string;
+  /**
+   * Base URL of the provider's API. Absent for providers whose SDK derives the
+   * URL internally (OpenAI, Anthropic, Google, xAI, Groq, ...) — models.dev
+   * leaves `api` empty for those; see KNOWN_BASE_URLS in dialects.ts.
+   * May contain `${ENV_VAR}` placeholders (e.g. Neon, Snowflake).
+   */
   api?: string;
   doc: string;
   env: string[];
@@ -70,3 +76,13 @@ export type Provider = {
 };
 
 export type ModelsDevData = Record<string, Provider>;
+
+/** Live-probed dialect support for one provider (keyless detection). */
+export type DialectInfo = {
+  /** dialect id -> best-guess full endpoint URL (statuses supported|likely) */
+  endpoints: Record<string, string>;
+  /** epoch ms when this provider was probed */
+  probedAt: number;
+  /** wall time of that provider's detection */
+  durationMs: number;
+};

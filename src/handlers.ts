@@ -1,5 +1,6 @@
 import type { ModelsDevData, Model, Provider, ReasoningOption } from "./types";
 import { normalize, similarity } from "./match";
+import { getDialectInfo, baseUrlOf } from "./dialects";
 
 const MATCH_THRESHOLD = 0.7;
 
@@ -37,7 +38,8 @@ export function handleRoot(): Response {
     description: "Re-shaped models.dev API",
     source: "https://models.dev/api.json",
     endpoints: {
-      "GET /provider": "List all providers (name, sdk, api).",
+      "GET /provider":
+        "List all providers (name, sdk, api, dialects). dialects = live-probed API dialect endpoints (24h TTL, keyless).",
       "GET /model-list?provider-name=<name>":
         "List models for one provider. Fuzzy match (case/whitespace-insensitive, >=70% similarity).",
       "GET /model?model-name=<name>":
@@ -48,10 +50,11 @@ export function handleRoot(): Response {
 }
 
 export function handleProvider(data: ModelsDevData): Response {
-  const providers = Object.values(data).map((p) => ({
+  const providers = Object.entries(data).map(([id, p]) => ({
     name: p.name,
     sdk: stripAiSdkPrefix(p.npm),
-    api: p.api ?? null,
+    api: baseUrlOf(id, p),
+    dialects: getDialectInfo(id)?.endpoints ?? null,
   }));
   providers.sort((a, b) => a.name.localeCompare(b.name));
   return jsonResponse({ count: providers.length, providers });
@@ -185,6 +188,8 @@ export function handleModel(
       results.push({
         provider: provider.name,
         provider_id: providerId,
+        api: baseUrlOf(providerId, provider),
+        dialects: getDialectInfo(providerId)?.endpoints ?? null,
         model_id: modelId,
         model_name: model.name,
         context_window: model.limit.context,
@@ -243,6 +248,8 @@ type MatchType = "exact" | "split" | "prefix" | "permutation";
 interface ModelMatch {
   provider: string;
   provider_id: string;
+  api: string | null;
+  dialects: Record<string, string> | null;
   model_id: string;
   model_name: string;
   context_window: number;

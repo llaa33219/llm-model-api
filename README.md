@@ -17,7 +17,7 @@ Re-shaped view of [`models.dev/api.json`](https://models.dev/api.json) deployed 
 
 | Endpoint | Returns |
 |---|---|
-| `GET https://lma.blp.sh/provider` | Every provider's `name`, short `sdk` package name, and `api` URL. |
+| `GET https://lma.blp.sh/provider` | Every provider's `name`, short `sdk` package name, `api` URL, and live-probed `dialects`. |
 | `GET https://lma.blp.sh/model-list?provider-name=<name>` | All models for one provider. Fuzzy-matches the provider name (case/whitespace-insensitive, ≥70% similarity). |
 | `GET https://lma.blp.sh/model?model-name=<name>` | Every model matching the name across **all** providers. **Strict** exact match (no fuzzy) — see [Matching rules](#matching-rules). Supports `provider/model` and `provider-model` syntax. Returns provider name, context window, max output tokens, input/output pricing, cache pricing, reasoning options. |
 | `GET https://lma.blp.sh/model?model-name=<name>&provider-name=<name>` | Same as above but scoped to a single provider (same fuzzy match as `/model-list`). Useful to collapse the 20+ duplicate hits from gateways into one result. Response includes the matched `provider` name and `provider_score`. |
@@ -120,6 +120,37 @@ If you want a model variant, type the full id (e.g. `gpt-5.1` directly). If no m
 - Module-level cache survives across requests within the same isolate
 - Concurrent refreshes are deduped via a single in-flight promise — no thundering herd
 
+## Dialect detection (`dialects` field)
+
+Each provider entry carries a `dialects` map — which wire protocols its base URL
+actually speaks, detected by **keyless live probing** with a vendored copy of
+[`llm-baseurl-detector`](https://github.com/llaa33219/llm-baseurl-detector)
+(`src/vendor/llm-baseurl-detector/`, Apache-2.0, algorithm ported verbatim).
+Five dialects are probed: `openai-chat`, `openai-responses`, `anthropic-messages`,
+`gemini-generate`, `typesafe-systemone`.
+
+- **Refresh timing**: dialect results get their own **24-hour TTL** (a provider's
+  wire protocol changes rarely, probing is expensive). A background refresh kicks
+  off on the first request that finds the cache absent, stale, failed, or built
+  from a different provider/api set — requests never block on it
+  (`ctx.waitUntil`), they just see `dialects: null` until the first refresh lands
+  (~15 s after cold start).
+- **Base URLs**: models.dev leaves `api` empty for providers whose SDK derives
+  the URL internally (OpenAI, Anthropic, Google, xAI, Groq, …) — those are probed
+  via a built-in canonical-URL fallback (`KNOWN_BASE_URLS` in `src/dialects.ts`),
+  so the flagship providers still get dialects. URLs with `${ENV_VAR}`
+  placeholders (Neon, Snowflake, …) are never probed.
+- **Trust levels**: on dedicated first-party hosts (`api.openai.com`, …) both
+  `supported` and `likely` verdicts surface. Multi-tenant gateways are probed for
+  the `openai-*` dialects only — their emulation of the anthropic/gemini error
+  envelopes (verified live: Together answers Anthropic's exact
+  `authentication_error` envelope on `/v1/messages`) would otherwise
+  false-positive every gateway as a four-dialect host.
+- **Budget**: ≤ 30 providers probed per refresh (flagships prioritized),
+  4 s per-probe timeout, identical base URLs deduped.
+- Diagnostics: `GET /cache-status` → `dialects` key (TTL, age, provider/base
+  counts, silent bases, refresh state).
+
 ## Local development
 
 ```bash
@@ -178,6 +209,9 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 │   ├── index.ts        # router + fetch handler
 │   ├── handlers.ts     # per-endpoint logic
 │   ├── fetch.ts        # models.dev fetch + 10-min cache
+│   ├── dialects.ts     # live-probed dialect cache (24h TTL, background refresh)
+│   ├── vendor/
+│   │   └── llm-baseurl-detector/  # vendored Apache-2.0 probing engine
 │   ├── match.ts        # normalize / levenshtein / similarity
 │   └── types.ts        # models.dev type definitions
 ├── wrangler.jsonc
@@ -191,14 +225,33 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 
 ```json
 {
-  "count": 144,
+  "count": 232,
   "providers": [
-    { "name": "OpenAI",    "sdk": "openai",            "api": null },
-    { "name": "Anthropic", "sdk": "anthropic",         "api": null },
-    { "name": "DeepSeek",  "sdk": "openai-compatible", "api": "https://api.deepseek.com" }
+    {
+      "name": "Anthropic",
+      "sdk": "anthropic",
+      "api": "https://api.anthropic.com",
+      "dialects": {
+        "anthropic-messages": "https://api.anthropic.com/v1/messages",
+        "openai-chat": "https://api.anthropic.com/v1/chat/completions"
+      }
+    },
+    {
+      "name": "OpenAI",
+      "sdk": "openai",
+      "api": "https://api.openai.com/v1",
+      "dialects": {
+        "openai-chat": "https://api.openai.com/v1/chat/completions",
+        "openai-responses": "https://api.openai.com/v1/responses"
+      }
+    },
+    { "name": "DeepSeek", "sdk": "openai-compatible", "api": "https://api.deepseek.com", "dialects": null }
   ]
 }
 ```
+
+`dialects: null` means "not probed / probing in progress / probes answered
+nothing verifiable" — never "the provider speaks no dialect".
 
 ### `GET /model-list?provider-name=open%20ai`
 
@@ -226,6 +279,11 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
     {
       "provider": "OpenAI",
       "provider_id": "openai",
+      "api": "https://api.openai.com/v1",
+      "dialects": {
+        "openai-chat": "https://api.openai.com/v1/chat/completions",
+        "openai-responses": "https://api.openai.com/v1/responses"
+      },
       "model_id": "gpt-5",
       "model_name": "GPT-5",
       "context_window": 400000,
@@ -247,11 +305,26 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 
 ```json
 {
-  "hasData": true,
-  "fetchedAt": 1782010626957,
-  "ageMs": 42318,
-  "ttlMs": 600000,
-  "isStale": false
+  "modelsDev": {
+    "hasData": true,
+    "fetchedAt": 1782010626957,
+    "ageMs": 42318,
+    "ttlMs": 600000,
+    "isStale": false
+  },
+  "dialects": {
+    "ttlMs": 86400000,
+    "refreshing": false,
+    "hasData": true,
+    "fetchedAt": 1782010653949,
+    "ageMs": 15064,
+    "isStale": false,
+    "providersWithDialects": 5,
+    "probedBaseUrls": 30,
+    "silentBaseUrls": 25,
+    "lastRefreshDurationMs": 12870,
+    "maxProvidersPerRefresh": 30
+  }
 }
 ```
 
