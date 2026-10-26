@@ -140,12 +140,14 @@ Five dialects are probed: `openai-chat`, `openai-responses`, `anthropic-messages
   via a built-in canonical-URL fallback (`KNOWN_BASE_URLS` in `src/dialects.ts`),
   so the flagship providers still get dialects. URLs with `${ENV_VAR}`
   placeholders (Neon, Snowflake, …) are never probed.
-- **Trust levels**: on dedicated first-party hosts (`api.openai.com`, …) both
-  `supported` and `likely` verdicts surface. Multi-tenant gateways are probed for
-  the `openai-*` dialects only — their emulation of the anthropic/gemini error
-  envelopes (verified live: Together answers Anthropic's exact
-  `authentication_error` envelope on `/v1/messages`) would otherwise
-  false-positive every gateway as a four-dialect host.
+- **Verdicts**: both `supported` (confirmed by a dialect-shaped body, a
+  dialect-specific error envelope, or a validate-before-auth fingerprint) and
+  `likely` (bare auth wall) surface verbatim, for every host and all five
+  dialects. The fingerprint probes are what separate a real route from a
+  gateway catch-all — verified live: Together validates the request body
+  *before* auth on `/v1/messages` (a real anthropic route), while DeepSeek
+  answers its OpenAI-shaped envelope there (no route). Many gateways genuinely
+  are multi-dialect — 302.AI answers all five.
 - **Budget**: ≤ 30 providers probed per refresh (flagships prioritized),
   4 s per-probe timeout, identical base URLs deduped.
 - Diagnostics: `GET /cache-status` → `dialects` key (TTL, age, provider/base
@@ -319,9 +321,9 @@ nothing verifiable" — never "the provider speaks no dialect".
     "fetchedAt": 1782010653949,
     "ageMs": 15064,
     "isStale": false,
-    "providersWithDialects": 5,
+    "providersWithDialects": 29,
     "probedBaseUrls": 30,
-    "silentBaseUrls": 25,
+    "silentBaseUrls": 1,
     "lastRefreshDurationMs": 12870,
     "maxProvidersPerRefresh": 30
   }

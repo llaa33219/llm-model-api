@@ -28,11 +28,19 @@ execSync(
     `--strict --skipLibCheck --declaration false`,
   { cwd: root, stdio: "inherit" },
 );
-// tsc emits ./vendor/... and ./dialects.js with extensionless imports; rewrite to .js
-execSync(
-  `find "${out}" -name '*.js' -exec sed -i -E "s|from \\"(\\./[^\\"]+)\\"|from \\"\\\\1.js\\"|g" {} +`,
-  { stdio: "inherit" },
-);
+// tsc emits extensionless/directory imports; rewrite them for node ESM.
+const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+for (const f of ["dialects.js"]) {
+  const fp = path.join(out, f);
+  let src = readFileSync(fp, "utf8");
+  src = src.replace(/from "(\.\/[^"]+)"/g, (m, p1) => {
+    const abs = path.join(out, p1);
+    if (existsSync(abs + ".js")) return `from "${p1}.js"`;
+    if (existsSync(path.join(abs, "index.js"))) return `from "${p1}/index.js"`;
+    return m;
+  });
+  writeFileSync(fp, src);
+}
 
 const { detect } = await import(path.join(out, "vendor", "llm-baseurl-detector", "index.js"));
 const dialectsMod = await import(path.join(out, "dialects.js"));
@@ -100,8 +108,10 @@ assert.equal(
 );
 
 // --- 5. first-party + gateway dialects --------------------------------------
-// First-party fallbacks keep all five dialects; gateways are restricted to
-// openai-* (their emulation of anthropic/gemini envelopes would false-positive).
+// Every host is probed for all five dialects with both supported|likely
+// verdicts surfaced — the fingerprint probes (validate-before-auth) separate
+// real routes from catch-alls. Verified live: Together really serves
+// anthropic-messages (body validated before auth), DeepSeek does not.
 const anthInfo = dialectsMod.getDialectInfo("anthropic");
 assert.ok(
   anthInfo && anthInfo.endpoints["anthropic-messages"],
@@ -112,15 +122,8 @@ assert.ok(
   oaiInfo && oaiInfo.endpoints["openai-chat"],
   "openai provider must expose openai-chat endpoint",
 );
-const gateway = dialectsMod.getDialectInfo("togetherai");
-if (gateway !== null) {
-  const dialects = Object.keys(gateway.endpoints);
-  console.log("     togetherai (gateway) dialects:", dialects.join(", "));
-  assert.ok(
-    dialects.every((d) => d.startsWith("openai-")),
-    `gateway providers must only expose openai-* dialects, got: ${dialects}`,
-  );
-}
+const together = dialectsMod.getDialectInfo("togetherai");
+console.log("     togetherai dialects:", together ? Object.keys(together.endpoints).join(", ") : "(silent)");
 console.log("     anthropic:", Object.keys(anthInfo.endpoints).join(", "));
 console.log("     openai:", Object.keys(oaiInfo.endpoints).join(", "));
 
