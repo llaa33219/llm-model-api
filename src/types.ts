@@ -77,10 +77,18 @@ export type Provider = {
 
 export type ModelsDevData = Record<string, Provider>;
 
+/** Dialect endpoints partitioned by the detector's confidence. */
+export type DialectEndpoints = {
+  /** Confirmed by a dialect-specific response, error envelope, or fingerprint. */
+  supported: Record<string, string>;
+  /** Plausible but unconfirmed (for example, a generic auth wall or rate limit). */
+  likely: Record<string, string>;
+};
+
 /** Live-probed dialect support for one provider (keyless detection). */
 export type DialectInfo = {
-  /** dialect id -> best-guess full endpoint URL (statuses supported|likely) */
-  endpoints: Record<string, string>;
+  /** Dialect id -> full endpoint URL, partitioned by confidence. */
+  endpoints: DialectEndpoints;
   /** epoch ms when this provider was probed */
   probedAt: number;
   /** wall time of that provider's detection */

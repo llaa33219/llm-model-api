@@ -10,7 +10,8 @@
 //   4. `${...}` env-placeholder URLs (e.g. Neon) are never probed
 //   5. non-@ai-sdk providers (togetherai, qvac, venice...) are probed too
 //   6. stripAiSdkPrefix passes non-@ai-sdk npm names through verbatim
-//   7. /provider response shape: {name, sdk, api, dialects}
+//   7. supported and likely endpoint groups stay separate
+//   8. a legacy flat cache is discarded and refreshed, never returned as-is
 //
 // Timeout: whole run must finish under ~5 min (30 providers x 4s probes, conc 6).
 
@@ -114,18 +115,31 @@ assert.equal(
 // anthropic-messages (body validated before auth), DeepSeek does not.
 const anthInfo = dialectsMod.getDialectInfo("anthropic");
 assert.ok(
-  anthInfo && anthInfo.endpoints["anthropic-messages"],
-  "anthropic provider must expose anthropic-messages endpoint",
+  anthInfo && anthInfo.endpoints.supported["anthropic-messages"],
+  "anthropic-messages must be in the confirmed group on api.anthropic.com",
 );
 const oaiInfo = dialectsMod.getDialectInfo("openai");
 assert.ok(
-  oaiInfo && oaiInfo.endpoints["openai-chat"],
-  "openai provider must expose openai-chat endpoint",
+  oaiInfo &&
+    (oaiInfo.endpoints.supported["openai-chat"] ||
+      oaiInfo.endpoints.likely["openai-chat"]),
+  "openai-chat must be present in exactly one confidence group",
 );
 const together = dialectsMod.getDialectInfo("togetherai");
-console.log("     togetherai dialects:", together ? Object.keys(together.endpoints).join(", ") : "(silent)");
-console.log("     anthropic:", Object.keys(anthInfo.endpoints).join(", "));
-console.log("     openai:", Object.keys(oaiInfo.endpoints).join(", "));
+for (const info of [anthInfo, oaiInfo, together].filter(Boolean)) {
+  for (const dialect of Object.keys(info.endpoints.supported)) {
+    assert.ok(
+      !Object.hasOwn(info.endpoints.likely, dialect),
+      `${dialect} must not appear in both supported and likely`,
+    );
+  }
+}
+const printEndpoints = (info) => info
+  ? JSON.stringify(info.endpoints)
+  : "(silent)";
+console.log("     togetherai dialects:", printEndpoints(together));
+console.log("     anthropic:", printEndpoints(anthInfo));
+console.log("     openai:", printEndpoints(oaiInfo));
 
 // --- 6. sdk prefix stripping ----------------------------------------------
 console.log("[6/7] checking sdk prefix pass-through ...");
@@ -137,10 +151,70 @@ for (const pr of nonAiSdk) {
 }
 console.log(`     ${nonAiSdk.length} non-@ai-sdk npm values all pass through verbatim`);
 
-// --- 7. anthropic endpoint sanity ------------------------------------------
-console.log("[7/7] verifying anthropic probe details ...");
+// --- 7. confidence groups use the detector's exact verdicts -----------------
+console.log("[7/7] verifying supported/likely separation ...");
 const anthProbe = anth.probes.find((pr) => pr.dialect === "anthropic-messages");
-console.log(`     verdict: ${anthProbe.status} @ ${anthProbe.probedUrl} (HTTP ${anthProbe.httpStatus})`);
+assert.equal(anthProbe.status, "supported");
+assert.ok(anthInfo.endpoints.supported["anthropic-messages"]);
+assert.ok(!anthInfo.endpoints.likely["anthropic-messages"]);
+const oaiChatProbe = oai.probes.find((pr) => pr.dialect === "openai-chat");
+const expectedGroup = oaiChatProbe.status === "supported" ? "supported" : "likely";
+assert.ok(oaiInfo.endpoints[expectedGroup]["openai-chat"]);
+assert.ok(!oaiInfo.endpoints[expectedGroup === "supported" ? "likely" : "supported"]["openai-chat"]);
+console.log(`     anthropic-messages: supported @ ${anthProbe.probedUrl}`);
+console.log(`     openai-chat: ${oaiChatProbe.status} @ ${oaiChatProbe.probedUrl}`);
 console.log(`     detail: ${anthProbe.detail}`);
+
+// --- 8. legacy cache schema compatibility -----------------------------------
+// Inject the exact pre-split flat cache entry into a separate compiled module
+// instance. This simulates retained module state without adding a production
+// test-only cache setter. The provider is intentionally unprobeable so the
+// required refresh completes without any network request.
+console.log("[8/8] checking legacy flat-cache invalidation ...");
+const legacyProvider = {
+  id: "legacy",
+  name: "Legacy",
+  npm: "@ai-sdk/openai-compatible",
+  api: "${LEGACY_BASE_URL}/v1",
+  doc: "",
+  env: [],
+  models: {},
+};
+const legacyData = { legacy: legacyProvider };
+const legacyCache = {
+  map: {
+    legacy: {
+      endpoints: { "openai-chat": "https://legacy.example/v1/chat/completions" },
+      probedAt: Date.now(),
+      durationMs: 1,
+    },
+  },
+  fetchedAt: Date.now(),
+  source: "legacy:${LEGACY_BASE_URL}/v1",
+  probedCount: 1,
+  silentCount: 0,
+  durationMs: 1,
+};
+const legacySource = readFileSync(path.join(out, "dialects.js"), "utf8");
+assert.ok(legacySource.includes("cache: null,"), "test must find the cache initializer");
+const legacyPath = path.join(out, "dialects-legacy.js");
+writeFileSync(
+  legacyPath,
+  legacySource.replace("cache: null,", `cache: ${JSON.stringify(legacyCache)},`),
+);
+const legacyModule = await import(legacyPath);
+assert.equal(
+  legacyModule.getDialectInfo("legacy"),
+  null,
+  "legacy flat cache must never be returned as nested supported/likely data",
+);
+const legacyRefresh = legacyModule.maybeRefreshDialects(legacyData, Date.now());
+assert.ok(legacyRefresh !== null, "legacy cache must trigger a refresh even when fresh");
+await legacyRefresh;
+const legacyStatus = legacyModule.dialectCacheStatus();
+assert.equal(legacyStatus.schemaVersion, 2, "refresh must write the current cache schema");
+assert.equal(legacyStatus.providersWithDialects, 0);
+assert.equal(legacyStatus.refreshing, false);
+console.log("     old cache discarded; refresh ran; schemaVersion=2");
 
 console.log("\nALL ASSERTIONS PASSED");

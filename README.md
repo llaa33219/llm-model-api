@@ -122,8 +122,8 @@ If you want a model variant, type the full id (e.g. `gpt-5.1` directly). If no m
 
 ## Dialect detection (`dialects` field)
 
-Each provider entry carries a `dialects` map — which wire protocols its base URL
-actually speaks, detected by **keyless live probing** with a vendored copy of
+Each provider entry carries a `dialects` object describing which wire protocols
+its base URL speaks, detected by **keyless live probing** with a vendored copy of
 [`llm-baseurl-detector`](https://github.com/llaa33219/llm-baseurl-detector)
 (`src/vendor/llm-baseurl-detector/`, Apache-2.0, algorithm ported verbatim).
 Five dialects are probed: `openai-chat`, `openai-responses`, `anthropic-messages`,
@@ -140,18 +140,24 @@ Five dialects are probed: `openai-chat`, `openai-responses`, `anthropic-messages
   via a built-in canonical-URL fallback (`KNOWN_BASE_URLS` in `src/dialects.ts`),
   so the flagship providers still get dialects. URLs with `${ENV_VAR}`
   placeholders (Neon, Snowflake, …) are never probed.
-- **Verdicts**: both `supported` (confirmed by a dialect-shaped body, a
-  dialect-specific error envelope, or a validate-before-auth fingerprint) and
-  `likely` (bare auth wall) surface verbatim, for every host and all five
-  dialects. The fingerprint probes are what separate a real route from a
-  gateway catch-all — verified live: Together validates the request body
-  *before* auth on `/v1/messages` (a real anthropic route), while DeepSeek
-  answers its OpenAI-shaped envelope there (no route). Many gateways genuinely
-  are multi-dialect — 302.AI answers all five.
+- **Confidence groups**: `dialects.supported` contains endpoints confirmed by a
+  dialect-shaped response, a dialect-specific error envelope, or a
+  validate-before-auth fingerprint. `dialects.likely` contains tentative matches
+  such as a generic auth wall or rate limit — **probably supported, not
+  confirmed**. Each group maps dialect ids to full endpoint URLs, and a dialect
+  appears in at most one group.
+- The fingerprint probes are what separate a real route from a gateway catch-all
+  — verified live: Together validates the request body *before* auth on
+  `/v1/messages` (a real anthropic route), while DeepSeek answers its
+  OpenAI-shaped envelope there (no route). Many gateways genuinely are
+  multi-dialect — 302.AI answers all five.
 - **Budget**: ≤ 30 providers probed per refresh (flagships prioritized),
   4 s per-probe timeout, identical base URLs deduped.
-- Diagnostics: `GET /cache-status` → `dialects` key (TTL, age, provider/base
-  counts, silent bases, refresh state).
+- **Cache compatibility**: dialect results are module-memory only (no KV/R2/Cache
+  Storage). The cache schema is versioned; an older flat endpoint map is discarded
+  and refreshed rather than being returned under the new `supported`/`likely` shape.
+- Diagnostics: `GET /cache-status` → `dialects` key (schema version, TTL, age,
+  provider/base counts, silent bases, refresh state).
 
 ## Local development
 
@@ -234,8 +240,12 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
       "sdk": "anthropic",
       "api": "https://api.anthropic.com",
       "dialects": {
-        "anthropic-messages": "https://api.anthropic.com/v1/messages",
-        "openai-chat": "https://api.anthropic.com/v1/chat/completions"
+        "supported": {
+          "anthropic-messages": "https://api.anthropic.com/v1/messages"
+        },
+        "likely": {
+          "openai-chat": "https://api.anthropic.com/v1/chat/completions"
+        }
       }
     },
     {
@@ -243,8 +253,11 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
       "sdk": "openai",
       "api": "https://api.openai.com/v1",
       "dialects": {
-        "openai-chat": "https://api.openai.com/v1/chat/completions",
-        "openai-responses": "https://api.openai.com/v1/responses"
+        "supported": {},
+        "likely": {
+          "openai-chat": "https://api.openai.com/v1/chat/completions",
+          "openai-responses": "https://api.openai.com/v1/responses"
+        }
       }
     },
     { "name": "DeepSeek", "sdk": "openai-compatible", "api": "https://api.deepseek.com", "dialects": null }
@@ -253,7 +266,8 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 ```
 
 `dialects: null` means "not probed / probing in progress / probes answered
-nothing verifiable" — never "the provider speaks no dialect".
+nothing verifiable" — never "the provider speaks no dialect". Empty
+`supported`/`likely` objects are valid when only one confidence group has hits.
 
 ### `GET /model-list?provider-name=open%20ai`
 
@@ -283,8 +297,11 @@ nothing verifiable" — never "the provider speaks no dialect".
       "provider_id": "openai",
       "api": "https://api.openai.com/v1",
       "dialects": {
-        "openai-chat": "https://api.openai.com/v1/chat/completions",
-        "openai-responses": "https://api.openai.com/v1/responses"
+        "supported": {},
+        "likely": {
+          "openai-chat": "https://api.openai.com/v1/chat/completions",
+          "openai-responses": "https://api.openai.com/v1/responses"
+        }
       },
       "model_id": "gpt-5",
       "model_name": "GPT-5",
@@ -315,6 +332,7 @@ nothing verifiable" — never "the provider speaks no dialect".
     "isStale": false
   },
   "dialects": {
+    "schemaVersion": 2,
     "ttlMs": 86400000,
     "refreshing": false,
     "hasData": true,

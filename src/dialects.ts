@@ -15,9 +15,13 @@
 //   - Concurrent refreshes are deduped via a single in-flight promise.
 
 import { detect } from "./vendor/llm-baseurl-detector";
-import type { DialectInfo, ModelsDevData, Provider } from "./types";
+import type { DialectEndpoints, DialectInfo, ModelsDevData, Provider } from "./types";
 
 const TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Dialect results are in-memory only (no KV/R2/Cache Storage). Version the
+// entry shape so a legacy flat {dialect: URL} map is never served as the new
+// {supported, likely} shape if an isolate retains module state.
+const CACHE_SCHEMA_VERSION = 2;
 
 /** Hard cap on providers probed per refresh — bounds total wall time. */
 const MAX_PROVIDERS_PER_REFRESH = 30;
@@ -57,6 +61,8 @@ const KNOWN_BASE_URLS: Record<string, string> = {
 const NATIVE_FIRST = Object.keys(KNOWN_BASE_URLS);
 
 interface CacheEntry {
+  /** Response/cache schema; older entries are discarded, never migrated by guessing. */
+  schemaVersion: number;
   /** provider id -> dialect info */
   map: Record<string, DialectInfo>;
   /** epoch ms when the last refresh COMPLETED successfully */
@@ -88,6 +94,23 @@ const state: State = {
   builtFromFetchedAt: null,
   refreshing: false,
 };
+
+/**
+ * Return only the current cache shape. A previous isolate/module cache has no
+ * schemaVersion and is discarded here; the next refresh rebuilds it with the
+ * confidence groups instead of exposing ambiguous legacy endpoints.
+ */
+function currentCache(): CacheEntry | null {
+  const cache = state.cache;
+  if (
+    cache !== null &&
+    (cache as Partial<CacheEntry>).schemaVersion !== CACHE_SCHEMA_VERSION
+  ) {
+    state.cache = null;
+    return null;
+  }
+  return cache;
+}
 
 function sourceFingerprint(data: ModelsDevData): string {
   return Object.entries(data)
@@ -150,12 +173,24 @@ async function refresh(data: ModelsDevData): Promise<void> {
         const result = await detect(base, {
           timeoutMs: PER_PROBE_TIMEOUT_MS,
           concurrency: 6,
-          // every host keeps all five dialects and both supported|likely
-          // verdicts — the fingerprint probes do the route-existence work
+          // Every host keeps all five dialects. Preserve the detector's exact
+          // confidence: supported and likely must never be presented as one set.
         });
-        const sorted = Object.fromEntries(
-          Object.entries(result.endpoints).sort(([a], [b]) => a.localeCompare(b)),
-        );
+        const endpoints: DialectEndpoints = { supported: {}, likely: {} };
+        for (const probe of result.probes) {
+          if (probe.dialect === "models-list") continue;
+          if (probe.status === "supported" || probe.status === "likely") {
+            endpoints[probe.status][probe.dialect] = probe.probedUrl;
+          }
+        }
+        const sorted: DialectEndpoints = {
+          supported: Object.fromEntries(
+            Object.entries(endpoints.supported).sort(([a], [b]) => a.localeCompare(b)),
+          ),
+          likely: Object.fromEntries(
+            Object.entries(endpoints.likely).sort(([a], [b]) => a.localeCompare(b)),
+          ),
+        };
         perUrl.set(base, {
           endpoints: sorted,
           probedAt: Date.now(),
@@ -177,7 +212,11 @@ async function refresh(data: ModelsDevData): Promise<void> {
     const info = perUrl.get(base);
     // Skip bases whose probes found nothing (every candidate auth-walled or
     // unreachable) — an empty endpoints object is noise in the response.
-    if (!info || Object.keys(info.endpoints).length === 0) {
+    if (
+      !info ||
+      (Object.keys(info.endpoints.supported).length === 0 &&
+        Object.keys(info.endpoints.likely).length === 0)
+    ) {
       silentCount++;
       continue;
     }
@@ -185,6 +224,7 @@ async function refresh(data: ModelsDevData): Promise<void> {
   }
 
   state.cache = {
+    schemaVersion: CACHE_SCHEMA_VERSION,
     map,
     fetchedAt: Date.now(),
     source: sourceFingerprint(data),
@@ -200,7 +240,7 @@ async function refresh(data: ModelsDevData): Promise<void> {
  * Never blocks — returns whatever the last completed refresh produced.
  */
 export function getDialectInfo(providerId: string): DialectInfo | null {
-  return state.cache?.map[providerId] ?? null;
+  return currentCache()?.map[providerId] ?? null;
 }
 
 /**
@@ -214,18 +254,18 @@ export function maybeRefreshDialects(
   dataFetchedAt: number | null,
 ): Promise<void> | null {
   const now = Date.now();
+  const cache = currentCache();
   const source = sourceFingerprint(data);
-  const stale =
-    state.cache === null || now - state.cache.fetchedAt >= TTL_MS;
-  const sourceChanged = state.cache !== null && state.cache.source !== source;
+  const stale = cache === null || now - cache.fetchedAt >= TTL_MS;
+  const sourceChanged = cache !== null && cache.source !== source;
   const lastAttemptFailed =
     state.failedAt !== null && now - state.failedAt >= 5 * 60 * 1000; // 5-min backoff after a failed refresh
   // Don't loop a refresh on every models.dev refetch when nothing changed.
   const alreadyBuiltFromThisData =
-    state.cache !== null &&
+    cache !== null &&
     !stale &&
     !sourceChanged &&
-    state.cache.source === source;
+    cache.source === source;
   if (alreadyBuiltFromThisData) return null;
   if (!stale && !sourceChanged && !lastAttemptFailed) return null;
   if (state.inflight !== null) return state.inflight;
@@ -246,20 +286,22 @@ export function maybeRefreshDialects(
 /** Diagnostics for /cache-status. */
 export function dialectCacheStatus(): Record<string, unknown> {
   const now = Date.now();
+  const cache = currentCache();
   return {
+    schemaVersion: CACHE_SCHEMA_VERSION,
     ttlMs: TTL_MS,
     refreshing: state.refreshing,
     builtFromFetchedAt: state.builtFromFetchedAt,
-    hasData: state.cache !== null,
-    fetchedAt: state.cache?.fetchedAt ?? null,
-    ageMs: state.cache ? now - state.cache.fetchedAt : null,
-    isStale: state.cache === null ? true : now - state.cache.fetchedAt >= TTL_MS,
-    providersWithDialects: state.cache ? Object.keys(state.cache.map).length : 0,
-    probedBaseUrls: state.cache?.probedCount ?? 0,
-    silentBaseUrls: state.cache?.silentCount ?? 0,
-    lastRefreshDurationMs: state.cache?.durationMs ?? null,
+    hasData: cache !== null,
+    fetchedAt: cache?.fetchedAt ?? null,
+    ageMs: cache ? now - cache.fetchedAt : null,
+    isStale: cache === null ? true : now - cache.fetchedAt >= TTL_MS,
+    providersWithDialects: cache ? Object.keys(cache.map).length : 0,
+    probedBaseUrls: cache?.probedCount ?? 0,
+    silentBaseUrls: cache?.silentCount ?? 0,
+    lastRefreshDurationMs: cache?.durationMs ?? null,
     lastFailedAt: state.failedAt,
     maxProvidersPerRefresh: MAX_PROVIDERS_PER_REFRESH,
-    note: "keyless live probing via vendored llm-baseurl-detector; endpoints = supported|likely dialects, every host probed for all five dialects",
+    note: "keyless live probing via vendored llm-baseurl-detector; supported = confirmed; likely = tentative; every host probed for all five dialects",
   };
 }

@@ -1,4 +1,4 @@
-import type { ModelsDevData, Model, Provider, ReasoningOption } from "./types";
+import type { DialectEndpoints, ModelsDevData, Model, Provider, ReasoningOption } from "./types";
 import { normalize, similarity } from "./match";
 import { getDialectInfo, baseUrlOf } from "./dialects";
 
@@ -39,7 +39,7 @@ export function handleRoot(): Response {
     source: "https://models.dev/api.json",
     endpoints: {
       "GET /provider":
-        "List all providers (name, sdk, api, dialects). dialects = live-probed API dialect endpoints (24h TTL, keyless).",
+        "List all providers (name, sdk, api, dialects). dialects.supported = confirmed; dialects.likely = tentative (24h TTL, keyless).",
       "GET /model-list?provider-name=<name>":
         "List models for one provider. Fuzzy match (case/whitespace-insensitive, >=70% similarity).",
       "GET /model?model-name=<name>":
@@ -249,7 +249,7 @@ interface ModelMatch {
   provider: string;
   provider_id: string;
   api: string | null;
-  dialects: Record<string, string> | null;
+  dialects: DialectEndpoints | null;
   model_id: string;
   model_name: string;
   context_window: number;
