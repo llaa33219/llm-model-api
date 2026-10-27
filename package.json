@@ -7,7 +7,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node test/dialect-coordinator.mjs && node test/api-dialects.mjs && node test/container-service.mjs && npm --prefix container test"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261027.1",

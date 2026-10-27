@@ -123,23 +123,30 @@ If you want a model variant, type the full id (e.g. `gpt-5.1` directly). If no m
 ## Dialect detection (`dialects` field)
 
 Each provider entry carries a `dialects` object describing which wire protocols
-its base URL speaks, detected by **keyless live probing** with a vendored copy of
+its base URL speaks, detected by **keyless live probing** with the actual npm
 [`llm-baseurl-detector`](https://github.com/llaa33219/llm-baseurl-detector)
-(`src/vendor/llm-baseurl-detector/`, Apache-2.0, algorithm ported verbatim).
-Five dialects are probed: `openai-chat`, `openai-responses`, `anthropic-messages`,
-`gemini-generate`, `typesafe-systemone`.
+package running in a **singleton Cloudflare Container**. Five dialects are probed:
+`openai-chat`, `openai-responses`, `anthropic-messages`, `gemini-generate`,
+`typesafe-systemone`.
 
-- **Refresh timing**: dialect results get their own **24-hour TTL** (a provider's
-  wire protocol changes rarely, probing is expensive). A background refresh kicks
-  off on the first request that finds the cache absent, stale, failed, or built
-  from a different provider/api set — requests never block on it
-  (`ctx.waitUntil`), they just see `dialects: null` until the first refresh lands
-  (~15 s after cold start).
+- **Architecture**: Worker → one named Durable Object (`global`) → one Container.
+  The container is only a replaceable probe engine. The Durable Object owns
+  persistent state, so Worker isolates all see the same results and container
+  sleep/restarts do not erase them. The container's own filesystem is ephemeral.
+- **Refresh timing**: results are valid for **24 hours**; failures retry after
+  5 minutes. Durable Object alarms process at most three base URLs per batch and
+  persist each URL's result **immediately after its probe**. A later failure or
+  eviction cannot discard completed work. All deduplicated provider base URLs are
+  covered incrementally, rather than only the first 30.
+- **Requests stay fast**: API handlers read the shared Durable Object snapshot
+  and register only a small internal target-list sync. They never run the long
+  third-party probing loop in `waitUntil`. While a base has no stored result its
+  `dialects` is `null`; it appears as soon as that base's batch completes.
 - **Base URLs**: models.dev leaves `api` empty for providers whose SDK derives
   the URL internally (OpenAI, Anthropic, Google, xAI, Groq, …) — those are probed
-  via a built-in canonical-URL fallback (`KNOWN_BASE_URLS` in `src/dialects.ts`),
-  so the flagship providers still get dialects. URLs with `${ENV_VAR}`
-  placeholders (Neon, Snowflake, …) are never probed.
+  via a built-in canonical-URL fallback (`KNOWN_BASE_URLS` in
+  `src/dialect-targets.ts`), so flagship providers still get dialects. URLs with
+  `${ENV_VAR}` placeholders (Neon, Snowflake, …) are never probed.
 - **Confidence groups**: `dialects.supported` contains endpoints confirmed by a
   dialect-shaped response, a dialect-specific error envelope, or a
   validate-before-auth fingerprint. `dialects.likely` contains tentative matches
@@ -151,20 +158,27 @@ Five dialects are probed: `openai-chat`, `openai-responses`, `anthropic-messages
   `/v1/messages` (a real anthropic route), while DeepSeek answers its
   OpenAI-shaped envelope there (no route). Many gateways genuinely are
   multi-dialect — 302.AI answers all five.
-- **Budget**: ≤ 30 providers probed per refresh (flagships prioritized),
-  4 s per-probe timeout, identical base URLs deduped.
-- **Cache compatibility**: dialect results are module-memory only (no KV/R2/Cache
-  Storage). The cache schema is versioned; an older flat endpoint map is discarded
-  and refreshed rather than being returned under the new `supported`/`likely` shape.
-- Diagnostics: `GET /cache-status` → `dialects` key (schema version, TTL, age,
-  provider/base counts, silent bases, refresh state).
+- **Budget**: three base URLs per alarm batch, 4 s per-probe timeout, identical
+  base URLs deduped. A single container and Durable Object avoid duplicate sweeps.
+- **Cache compatibility**: the Durable Object uses versioned storage keys and
+  records. The old module-memory flat map was not a persistent cache; it is not
+  returned under the new `supported`/`likely` shape.
+- Diagnostics: `GET /cache-status` → `dialects` key (backend, schema version,
+  target/probed/failed base counts, refresh state, last batch and error).
 
 ## Local development
 
 ```bash
 npm install
-npm run dev            # wrangler dev on http://127.0.0.1:8787
 npm run typecheck      # tsc --noEmit
+npm test               # DO, API and actual Node detector service tests
+
+# Docker must be running for the Container-enabled local dev server:
+npm run dev            # wrangler dev on http://127.0.0.1:8787
+
+# The detector service can also be exercised directly, without Docker:
+npm --prefix container install
+npm --prefix container start
 ```
 
 ## Deploying to lma.blp.sh
@@ -180,6 +194,11 @@ npm run typecheck      # tsc --noEmit
    ```
 
 ### Deploy
+
+Containers require the **Workers Paid plan**. For a production Git integration,
+set the deploy command to `npx wrangler deploy` (or `npm run deploy`) — the
+production build must build/publish the Container image as well as the Worker.
+The first deploy can take several minutes while the image is provisioned.
 
 ```bash
 npm run deploy
@@ -217,11 +236,18 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 │   ├── index.ts        # router + fetch handler
 │   ├── handlers.ts     # per-endpoint logic
 │   ├── fetch.ts        # models.dev fetch + 10-min cache
-│   ├── dialects.ts     # live-probed dialect cache (24h TTL, background refresh)
-│   ├── vendor/
-│   │   └── llm-baseurl-detector/  # vendored Apache-2.0 probing engine
+│   ├── dialects.ts     # shared snapshot reads + bounded target sync
+│   ├── dialect-targets.ts # provider base URL resolution/deduplication
+│   ├── dialect-client.ts  # singleton DO client
+│   ├── dialect-coordinator.ts # per-base persistence + incremental alarms
+│   ├── dialect-container.ts # Container lifecycle + probe forwarding
 │   ├── match.ts        # normalize / levenshtein / similarity
-│   └── types.ts        # models.dev type definitions
+│   └── types.ts        # shared API and persistence types
+├── container/
+│   ├── Dockerfile      # Node 22 production image
+│   ├── server.mjs      # HTTP service using npm llm-baseurl-detector
+│   └── package.json    # container-owned locked runtime dependency
+├── test/               # deterministic DO/API + live Node service tests
 ├── wrangler.jsonc
 ├── tsconfig.json
 └── package.json
@@ -333,17 +359,17 @@ nothing verifiable" — never "the provider speaks no dialect". Empty
   },
   "dialects": {
     "schemaVersion": 2,
+    "backend": "cloudflare-container+durable-object",
     "ttlMs": 86400000,
     "refreshing": false,
     "hasData": true,
-    "fetchedAt": 1782010653949,
-    "ageMs": 15064,
-    "isStale": false,
+    "targetBaseUrls": 213,
     "providersWithDialects": 29,
     "probedBaseUrls": 30,
-    "silentBaseUrls": 1,
-    "lastRefreshDurationMs": 12870,
-    "maxProvidersPerRefresh": 30
+    "failedBaseUrls": 1,
+    "lastBatchAt": 1782010653949,
+    "lastBatchDurationMs": 12870,
+    "lastError": null
   }
 }
 ```

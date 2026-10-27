@@ -1,6 +1,6 @@
 import type { DialectEndpoints, ModelsDevData, Model, Provider, ReasoningOption } from "./types";
 import { normalize, similarity } from "./match";
-import { getDialectInfo, baseUrlOf } from "./dialects";
+import { baseUrlOf } from "./dialect-targets";
 
 const MATCH_THRESHOLD = 0.7;
 
@@ -49,12 +49,15 @@ export function handleRoot(): Response {
   });
 }
 
-export function handleProvider(data: ModelsDevData): Response {
+export function handleProvider(
+  data: ModelsDevData,
+  dialectMap: ReadonlyMap<string, DialectEndpoints> = new Map(),
+): Response {
   const providers = Object.entries(data).map(([id, p]) => ({
     name: p.name,
     sdk: stripAiSdkPrefix(p.npm),
     api: baseUrlOf(id, p),
-    dialects: getDialectInfo(id)?.endpoints ?? null,
+    dialects: dialectMap.get(id) ?? null,
   }));
   providers.sort((a, b) => a.name.localeCompare(b.name));
   return jsonResponse({ count: providers.length, providers });
@@ -152,6 +155,7 @@ export function handleModel(
   data: ModelsDevData,
   modelNameRaw: string | null,
   providerNameRaw: string | null,
+  dialectMap: ReadonlyMap<string, DialectEndpoints> = new Map(),
 ): Response {
   if (modelNameRaw === null || modelNameRaw.trim() === "") {
     return errorResponse("Missing required query parameter: model-name", 400);
@@ -189,7 +193,7 @@ export function handleModel(
         provider: provider.name,
         provider_id: providerId,
         api: baseUrlOf(providerId, provider),
-        dialects: getDialectInfo(providerId)?.endpoints ?? null,
+        dialects: dialectMap.get(providerId) ?? null,
         model_id: modelId,
         model_name: model.name,
         context_window: model.limit.context,

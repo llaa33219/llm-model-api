@@ -2,13 +2,35 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "llm-model-api",
   "main": "src/index.ts",
-  "compatibility_date": "2026-01-15",
+  "compatibility_date": "2026-10-27",
   "compatibility_flags": ["nodejs_compat"],
   "observability": {
     "enabled": true,
     "traces": {
       "enabled": true,
       "head_sampling_rate": 1
+    }
+  },
+  "containers": [
+    {
+      "class_name": "DialectDetectorContainer",
+      "image": "./container/Dockerfile",
+      "instance_type": "standard-1",
+      "max_instances": 1
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "DIALECT_DETECTOR",
+        "class_name": "DialectDetectorContainer"
+      }
+    ]
+  },
+  "exports": {
+    "DialectDetectorContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
     }
   },
   "routes": [

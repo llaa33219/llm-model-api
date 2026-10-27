@@ -94,3 +94,34 @@ export type DialectInfo = {
   /** wall time of that provider's detection */
   durationMs: number;
 };
+/** A unique provider base URL and the provider ids that share its probe result. */
+export type DialectTarget = {
+  base: string;
+  providers: string[];
+};
+
+/** One persisted probe attempt, including empty and failed results. */
+export type DialectRecord = {
+  base: string;
+  endpoints: DialectEndpoints;
+  probedAt: number;
+  durationMs: number;
+  nextAttemptAt: number;
+  error: string | null;
+};
+
+/** Shared snapshot returned by the singleton Durable Object to Worker isolates. */
+export type DialectSnapshot = {
+  schemaVersion: number;
+  source: string | null;
+  targets: DialectTarget[];
+  records: DialectRecord[];
+  refreshing: boolean;
+  lastError: string | null;
+  lastBatchAt: number | null;
+  lastBatchDurationMs: number | null;
+};
+
+export type Env = {
+  DIALECT_DETECTOR: DurableObjectNamespace;
+};
