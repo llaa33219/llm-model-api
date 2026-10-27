@@ -8,11 +8,14 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "typecheck": "tsc --noEmit",
-    "test": "node test/dialect-coordinator.mjs && node test/api-dialects.mjs && node test/container-service.mjs && npm --prefix container test"
+    "test": "node test/api-dialects.mjs && node test/container-service.mjs && npm --prefix container test"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20261027.1",
     "typescript": "^5.9.3",
     "wrangler": "^4.153.0"
+  },
+  "dependencies": {
+    "@cloudflare/containers": "^0.3.7"
   }
 }

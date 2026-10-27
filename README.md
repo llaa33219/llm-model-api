@@ -129,13 +129,17 @@ package running in a **singleton Cloudflare Container**. Five dialects are probe
 `openai-chat`, `openai-responses`, `anthropic-messages`, `gemini-generate`,
 `typesafe-systemone`.
 
-- **Architecture**: Worker → one named Durable Object (`global`) → one Container.
-  The container is only a replaceable probe engine. The Durable Object owns
-  persistent state, so Worker isolates all see the same results and container
-  sleep/restarts do not erase them. The container's own filesystem is ephemeral.
+- **Architecture**: Worker → `getContainer()` → one singleton
+  `DialectDetectorContainer extends Container`. The documented Container class
+  owns startup, readiness and idle shutdown. The Node process runs the long
+  detector loop. Durable Object storage owns persistent results, so all Worker
+  isolates share them and container sleep/restarts do not erase them.
+- **Container ↔ Durable Object**: a virtual `dialect-detector.internal` host is
+  handled by `outboundByHost`, which routes the Node process's result writes back
+  to its own Durable Object storage. No state is stored on ephemeral container disk.
 - **Refresh timing**: results are valid for **24 hours**; failures retry after
-  5 minutes. Durable Object alarms process at most three base URLs per batch and
-  persist each URL's result **immediately after its probe**. A later failure or
+  5 minutes. The container's internal loop probes due URLs sequentially and
+  persists each result **immediately after its probe**. A later failure or
   eviction cannot discard completed work. All deduplicated provider base URLs are
   covered incrementally, rather than only the first 30.
 - **Requests stay fast**: API handlers read the shared Durable Object snapshot
@@ -158,8 +162,8 @@ package running in a **singleton Cloudflare Container**. Five dialects are probe
   `/v1/messages` (a real anthropic route), while DeepSeek answers its
   OpenAI-shaped envelope there (no route). Many gateways genuinely are
   multi-dialect — 302.AI answers all five.
-- **Budget**: three base URLs per alarm batch, 4 s per-probe timeout, identical
-  base URLs deduped. A single container and Durable Object avoid duplicate sweeps.
+- **Budget**: sequential probes inside one container, 4 s per-probe timeout,
+  identical base URLs deduped. `sleepAfter = "30m"` stops an idle container.
 - **Cache compatibility**: the Durable Object uses versioned storage keys and
   records. The old module-memory flat map was not a persistent cache; it is not
   returned under the new `supported`/`likely` shape.
@@ -238,14 +242,14 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 │   ├── fetch.ts        # models.dev fetch + 10-min cache
 │   ├── dialects.ts     # shared snapshot reads + bounded target sync
 │   ├── dialect-targets.ts # provider base URL resolution/deduplication
-│   ├── dialect-client.ts  # singleton DO client
-│   ├── dialect-coordinator.ts # per-base persistence + incremental alarms
-│   ├── dialect-container.ts # Container lifecycle + probe forwarding
+│   ├── dialect-client.ts  # getContainer singleton + RPC calls
+│   ├── dialect-store.ts   # persistent result records on the Container DO
+│   ├── dialect-container.ts # Container class + outboundByHost storage route
 │   ├── match.ts        # normalize / levenshtein / similarity
 │   └── types.ts        # shared API and persistence types
 ├── container/
 │   ├── Dockerfile      # Node 22 production image
-│   ├── server.mjs      # HTTP service using npm llm-baseurl-detector
+│   ├── server.mjs      # internal detector loop + HTTP control/probe endpoints
 │   └── package.json    # container-owned locked runtime dependency
 ├── test/               # deterministic DO/API + live Node service tests
 ├── wrangler.jsonc

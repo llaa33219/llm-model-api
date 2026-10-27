@@ -1,9 +1,9 @@
 // In-isolate read cache for Durable Object-backed dialect results.
-// Third-party probing happens only in the Cloudflare Container, driven by DO
-// alarms. A Worker request performs at most a tiny internal target-list sync.
+// Third-party probing happens only in the long-running Container process.
+// A Worker request performs at most a tiny internal target-list sync.
 
 import { getDialectSnapshot, syncDialectDetector } from "./dialect-client";
-import { DIALECT_CACHE_SCHEMA_VERSION } from "./dialect-coordinator";
+import { DIALECT_CACHE_SCHEMA_VERSION } from "./dialect-store";
 import { dialectSourceFingerprint, dialectTargets } from "./dialect-targets";
 import type { DialectEndpoints, DialectSnapshot, Env, ModelsDevData } from "./types";
 
@@ -15,7 +15,7 @@ const SNAPSHOT_TTL_MS = 5000;
 const SYNC_THROTTLE_MS = 60 * 1000;
 const DIALECT_TTL_MS = 24 * 60 * 60 * 1000;
 let snapshotCache: { value: DialectSnapshot; fetchedAt: number } | null = null;
-let pendingSync: Promise<DialectSnapshot> | null = null;
+let pendingSync: Promise<void> | null = null;
 let lastSyncAt = 0;
 let lastSyncSource = "";
 let lastSyncError: string | null = null;
@@ -27,6 +27,7 @@ function emptySnapshot(): DialectSnapshot {
     targets: [],
     records: [],
     refreshing: false,
+    activeBase: null,
     lastError: null,
     lastBatchAt: null,
     lastBatchDurationMs: null,
@@ -62,12 +63,8 @@ export function scheduleDialectSync(env: DialectEnv, ctx: ExecutionContext, data
   lastSyncSource = source;
   lastSyncAt = Date.now();
   pendingSync = syncDialectDetector(env, source, dialectTargets(data))
-    .then((value) => {
-      if (value.schemaVersion === DIALECT_CACHE_SCHEMA_VERSION) {
-        snapshotCache = { value, fetchedAt: Date.now() };
-      }
+    .then(() => {
       lastSyncError = null;
-      return value;
     })
     .catch((error) => {
       lastSyncError = error instanceof Error ? error.message : String(error);
@@ -114,6 +111,7 @@ export async function dialectCacheStatus(env: DialectEnv): Promise<Record<string
     backend: "cloudflare-container+durable-object",
     ttlMs: DIALECT_TTL_MS,
     refreshing: snapshot.refreshing,
+    activeBase: snapshot.activeBase ?? null,
     hasData: validRecords.some((record) =>
       Object.keys(record.endpoints.supported).length > 0 ||
       Object.keys(record.endpoints.likely).length > 0
@@ -127,6 +125,6 @@ export async function dialectCacheStatus(env: DialectEnv): Promise<Record<string
     lastBatchAt: snapshot.lastBatchAt,
     lastBatchDurationMs: snapshot.lastBatchDurationMs,
     lastError: snapshot.lastError ?? lastSyncError,
-    note: "actual npm llm-baseurl-detector in a singleton container; per-base results persist immediately in Durable Object storage and refresh incrementally via alarms",
+    note: "actual npm llm-baseurl-detector in a singleton container; per-base results persist immediately in Durable Object storage and refresh in its internal loop",
   };
 }

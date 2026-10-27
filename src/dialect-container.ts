@@ -1,110 +1,119 @@
-// Singleton Cloudflare Container + persistent Durable Object coordination.
-// The Linux container runs the real llm-baseurl-detector package. This DO owns
-// all durable state and schedules small probe batches with storage alarms.
+// Documented Container-class integration for the default scheduling policy.
+// Lifecycle, startup and port readiness are handled by @cloudflare/containers.
 
-import { DurableObject } from "cloudflare:workers";
-import { DialectCoordinator } from "./dialect-coordinator";
-import type { DialectRecord, DialectTarget, Env } from "./types";
+import { Container } from "@cloudflare/containers";
+import { DialectStore } from "./dialect-store";
+import type {
+  DialectRecord,
+  DialectSnapshot,
+  DialectTarget,
+  Env,
+} from "./types";
 
-const CONTAINER_PORT = 8080;
-const CONTAINER_INACTIVITY_MS = 30 * 60 * 1000;
-const CONTAINER_READY_ATTEMPTS = 100;
-const CONTAINER_READY_DELAY_MS = 200;
-const CONTAINER_PROBE_TIMEOUT_MS = 180 * 1000;
-const CONTAINER_HEALTH_TIMEOUT_MS = 1000;
+export interface ProbeResult {
+  base: string;
+  ok: boolean;
+  endpoints?: DialectRecord["endpoints"];
+  durationMs: number;
+  error?: string;
+}
 
-export class DialectDetectorContainer extends DurableObject<Env> {
-  private readonly coordinator: DialectCoordinator;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.coordinator = new DialectCoordinator(ctx.storage, (base) => this.probe(base));
-    if (ctx.container?.running) {
-      void ctx.blockConcurrencyWhile(() =>
-        ctx.container!.setInactivityTimeout(CONTAINER_INACTIVITY_MS),
-      );
-    }
+export class DialectDetectorContainer extends Container<Env> {
+  // Container -> virtual host -> this same Durable Object. This is the
+  // documented way for a container to use a binding / its DO state.
+  static {
+    // The base class registers handlers through its static setter. A class
+    // field would shadow that setter without invoking it (ES2022 semantics).
+    this.outboundByHost = {
+      "dialect-detector.internal": async (
+        request: Request,
+        env: Env,
+        ctx: { containerId: string },
+      ): Promise<Response> => {
+        const id = env.DIALECT_DETECTOR.idFromString(ctx.containerId);
+        return await env.DIALECT_DETECTOR.get(id).fetch(request);
+      },
+    };
   }
 
-  async fetch(request: Request): Promise<Response> {
+  defaultPort = 8080;
+  sleepAfter = "30m";
+  enableInternet = true;
+
+  override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const store = new DialectStore(this.ctx.storage);
     if (request.method === "GET" && url.pathname === "/state") {
-      return Response.json(await this.coordinator.snapshot());
+      return Response.json(await store.snapshot());
     }
     if (request.method === "POST" && url.pathname === "/sync") {
       try {
-        const body = await request.json<{ source?: string; targets?: DialectTarget[] }>();
-        if (
-          typeof body.source !== "string" ||
-          !Array.isArray(body.targets) ||
-          !body.targets.every((target) =>
-            typeof target.base === "string" &&
-            Array.isArray(target.providers) &&
-            target.providers.every((id) => typeof id === "string")
-          )
-        ) {
-          return Response.json({ error: "Expected {source, targets:[{base,providers}]}" }, { status: 400 });
+        const body = await request.json<{ source: string; targets: DialectTarget[] }>();
+        if (typeof body.source !== "string" || !Array.isArray(body.targets)) {
+          return Response.json({ error: "Expected source and targets" }, { status: 400 });
         }
-        return Response.json(await this.coordinator.sync(body.source, body.targets));
+        await store.configure(body.source, body.targets);
+        // Let the library start/wait for the process; do not hand-roll start().
+        const control = await this.containerFetch("http://container/control", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (!control.ok) {
+          return Response.json(
+            { error: `Container control failed: ${await control.text()}` },
+            { status: 502 },
+          );
+        }
+        return Response.json(await store.snapshot());
       } catch (error) {
-        return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
+        return Response.json(
+          { error: error instanceof Error ? error.message : String(error) },
+          { status: 400 },
+        );
       }
+    }
+    if (request.method === "POST" && url.pathname === "/stop") {
+      return await this.containerFetch("http://container/stop", { method: "POST" });
+    }
+    if (request.method === "POST" && url.pathname === "/results") {
+      return await this.saveResults(await request.json());
     }
     return Response.json({ error: "Not Found" }, { status: 404 });
   }
 
-  async alarm(): Promise<void> {
-    await this.coordinator.alarm();
+  async getSnapshot(): Promise<DialectSnapshot> {
+    return await new DialectStore(this.ctx.storage).snapshot();
   }
 
-  private async probe(base: string): Promise<Pick<DialectRecord, "endpoints" | "durationMs">> {
-    const container = this.ctx.container;
-    if (!container) throw new Error("No container configured for DialectDetectorContainer");
-    await container.setInactivityTimeout(CONTAINER_INACTIVITY_MS);
-    if (!container.running) {
-      // Default scheduling policy takes image/instance from wrangler.jsonc.
-      container.start({ enableInternet: true });
-    }
-    const port = container.getTcpPort(CONTAINER_PORT);
-    await this.waitForContainer(port);
-    const response = await port.fetch("http://container/probe", {
+  async sync(source: string, targets: DialectTarget[]): Promise<void> {
+    await new DialectStore(this.ctx.storage).configure(source, targets);
+    const response = await this.containerFetch("http://container/control", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ bases: [base], timeoutMs: 4000 }),
-      signal: AbortSignal.timeout(CONTAINER_PROBE_TIMEOUT_MS),
+      body: JSON.stringify({ source, targets }),
     });
-    if (!response.ok) {
-      throw new Error(`Container probe returned HTTP ${response.status}: ${await response.text()}`);
-    }
-    const body = await response.json<{
-      results?: Array<{
-        ok: boolean;
-        endpoints?: DialectRecord["endpoints"];
-        durationMs: number;
-        error?: string;
-      }>;
-    }>();
-    const result = body.results?.[0];
-    if (!result || !result.ok || !result.endpoints) {
-      throw new Error(result?.error ?? "Container probe returned no result");
-    }
-    return { endpoints: result.endpoints, durationMs: result.durationMs };
+    if (!response.ok) throw new Error(`Container control failed: ${await response.text()}`);
   }
 
-  private async waitForContainer(port: Fetcher): Promise<void> {
-    let lastError: unknown;
-    for (let attempt = 0; attempt < CONTAINER_READY_ATTEMPTS; attempt++) {
-      try {
-        const response = await port.fetch("http://container/health", {
-          signal: AbortSignal.timeout(CONTAINER_HEALTH_TIMEOUT_MS),
-        });
-        if (!response.ok) throw new Error(`Health check returned HTTP ${response.status}`);
-        return;
-      } catch (error) {
-        lastError = error;
-        await scheduler.wait(CONTAINER_READY_DELAY_MS);
-      }
+  async saveResults(body: {
+    results: ProbeResult[];
+    startedAt: number;
+    lastError: string | null;
+    begin?: string;
+  }): Promise<Response> {
+    this.renewActivityTimeout();
+    const store = new DialectStore(this.ctx.storage);
+    if (body.begin) await store.beginPass(body.begin);
+    for (const result of body.results) {
+      await store.save(
+        result.base,
+        result.endpoints ?? { supported: {}, likely: {} },
+        result.durationMs,
+        result.ok ? null : result.error ?? "probe failed",
+      );
     }
-    throw new Error("Container did not become ready on port 8080", { cause: lastError });
+    await store.completeBatch(body.startedAt, body.lastError);
+    return Response.json({ ok: true });
   }
 }

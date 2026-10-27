@@ -5,12 +5,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const child = spawn(process.execPath, ["server.mjs"], {
+const child = spawn(process.execPath, ["-e", `import { createServer } from "./server.mjs"; createServer({startLoop:false}).listen(18080,"0.0.0.0");`], {
   cwd: path.join(root, "container"),
-  env: { ...process.env, PORT: "18080" },
+  env: { ...process.env, PORT: "18080", DIALECT_RESULTS_URL: "http://127.0.0.1:18080/results" },
   stdio: ["ignore", "pipe", "pipe"],
 });
-child.stdout.on("data", (chunk) => process.stdout.write(chunk));
+const probeLog = [];
+child.stdout.on("data", (chunk) => { probeLog.push(chunk.toString()); process.stdout.write(chunk); });
 child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 try {
   let ready = false;

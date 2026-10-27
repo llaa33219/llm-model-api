@@ -117,11 +117,12 @@ export type DialectSnapshot = {
   targets: DialectTarget[];
   records: DialectRecord[];
   refreshing: boolean;
+  activeBase: string | null;
   lastError: string | null;
   lastBatchAt: number | null;
   lastBatchDurationMs: number | null;
 };
 
 export type Env = {
-  DIALECT_DETECTOR: DurableObjectNamespace;
+  DIALECT_DETECTOR: DurableObjectNamespace<import("./dialect-container").DialectDetectorContainer>;
 };
