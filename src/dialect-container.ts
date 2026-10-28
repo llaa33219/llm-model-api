@@ -58,9 +58,18 @@ export class DialectDetectorDurableContainer extends DurableObject<Env> {
   private async startAndWaitForPort(): Promise<void> {
     const container = this.ctx.container;
     if (!container) throw new Error("No container configured for DialectDetectorDurableContainer");
+    const configuredImage = container.images.base;
+    if (container.running) {
+      // durable_object does not roll out named images automatically. Restart
+      // the old process so detector upgrades actually reach production.
+      const current = await container.inspect();
+      if (current && current.image !== "" && current.image !== configuredImage) {
+        await container.destroy("Apply updated detector image");
+      }
+    }
     if (!container.running) {
       container.start({
-        image: container.images.base,
+        image: configuredImage,
         instance: "standard-1",
         enableInternet: true,
       });
