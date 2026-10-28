@@ -1,5 +1,7 @@
 import { getData, cacheStatus } from "./fetch";
 import type { Env } from "./types";
+export { ContainerProxy } from "@cloudflare/containers";
+export { DialectDetectorContainer } from "./legacy-dialect-container";
 export { DialectDetectorDurableContainer, DialectResultsWorker } from "./dialect-container";
 import { dialectCacheStatus, dialectMapForModels, scheduleDialectSync } from "./dialects";
 import {
