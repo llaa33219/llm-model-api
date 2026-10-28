@@ -58,15 +58,15 @@ export class DialectDetectorDurableContainer extends DurableObject<Env> {
     const container = this.ctx.container;
     if (!container) throw new Error("No container configured for DialectDetectorDurableContainer");
     if (!container.running) {
-      await this.configureContainer();
       container.start({
         image: container.images.base,
         instance: "standard-1",
         enableInternet: true,
       });
-    } else {
-      await this.configureContainer();
     }
+    // Runtime settings are applied only after start(). Calling
+    // setInactivityTimeout on an unstarted container aborts the whole sync.
+    await this.configureContainer();
     const port = container.getTcpPort(PORT);
     let lastError: unknown;
     for (let attempt = 0; attempt < READY_ATTEMPTS; attempt++) {
