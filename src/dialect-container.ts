@@ -14,6 +14,7 @@ export interface ProbeResult {
   base: string;
   ok: boolean;
   endpoints?: DialectRecord["endpoints"];
+  rawEndpoints?: DialectRecord["rawEndpoints"];
   durationMs: number;
   error?: string;
 }
@@ -158,6 +159,7 @@ export class DialectDetectorDurableContainer extends DurableObject<Env> {
         result.endpoints ?? { supported: {}, likely: {} },
         result.durationMs,
         result.ok ? null : result.error ?? "probe failed",
+        result.rawEndpoints,
       );
     }
     await store.completeBatch(body.startedAt, body.lastError);

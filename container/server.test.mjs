@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateProbeRequest, partitionEndpoints, runProbePass, createControlHandler, DetectorLoop } from "./server.mjs";
+import { validateProbeRequest, partitionEndpoints, partitionSdkBaseUrls, runProbePass, createControlHandler, DetectorLoop } from "./server.mjs";
 
 test("health endpoint", async () => {
   const res = await createControlHandler({getSnapshot:async()=>({targets:[],records:[]}),saveResults:async()=>{}})(new Request("http://container/health"));
@@ -25,6 +25,23 @@ test("supported and likely remain disjoint", () => {
   assert.deepEqual(result, {
     supported: { "anthropic-messages": "https://x/v1/messages" },
     likely: { "openai-chat": "https://x/chat/completions" },
+  });
+});
+
+test("public values come from sdkBaseUrls, not raw endpoints", () => {
+  const result = partitionSdkBaseUrls({
+    probes: [
+      { dialect: "anthropic-messages", status: "supported", probedUrl: "https://x/v1/messages" },
+      { dialect: "openai-chat", status: "likely", probedUrl: "https://x/v1/chat/completions" },
+    ],
+    sdkBaseUrls: {
+      "anthropic-messages": "https://x",
+      "openai-chat": "https://x/v1",
+    },
+  });
+  assert.deepEqual(result, {
+    supported: { "anthropic-messages": "https://x" },
+    likely: { "openai-chat": "https://x/v1" },
   });
 });
 

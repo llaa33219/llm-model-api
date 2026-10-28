@@ -36,9 +36,10 @@ try {
   const body = await response.json();
   assert.equal(body.results.length, 2);
   const [anthropic, openai] = body.results;
-  assert.ok(anthropic.endpoints.supported["anthropic-messages"]);
+  assert.equal(anthropic.endpoints.supported["anthropic-messages"], "https://api.anthropic.com");
   assert.ok(!anthropic.endpoints.likely["anthropic-messages"]);
-  assert.ok(openai.endpoints.likely["openai-chat"] || openai.endpoints.supported["openai-chat"]);
+  assert.equal(anthropic.rawEndpoints.supported["anthropic-messages"], "https://api.anthropic.com/v1/messages");
+  assert.equal(openai.endpoints.likely["openai-chat"] || openai.endpoints.supported["openai-chat"], "https://api.openai.com/v1");
   console.log("Real npm detector via container HTTP service:", JSON.stringify(body, null, 2));
 
   const invalid = await fetch("http://127.0.0.1:18080/probe", {

@@ -11,6 +11,6 @@
     "test": "node --test server.test.mjs"
   },
   "dependencies": {
-    "llm-baseurl-detector": "0.1.2"
+    "llm-baseurl-detector": "0.2.0"
   }
 }

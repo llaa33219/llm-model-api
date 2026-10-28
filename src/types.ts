@@ -77,7 +77,7 @@ export type Provider = {
 
 export type ModelsDevData = Record<string, Provider>;
 
-/** Dialect endpoints partitioned by the detector's confidence. */
+/** SDK base URLs partitioned by the detector's confidence. */
 export type DialectEndpoints = {
   /** Confirmed by a dialect-specific response, error envelope, or fingerprint. */
   supported: Record<string, string>;
@@ -103,7 +103,10 @@ export type DialectTarget = {
 /** One persisted probe attempt, including empty and failed results. */
 export type DialectRecord = {
   base: string;
+  /** SDK base URLs returned by the detector, not raw POST endpoints. */
   endpoints: DialectEndpoints;
+  /** Raw POST endpoints retained only as internal diagnostics. */
+  rawEndpoints?: DialectEndpoints;
   probedAt: number;
   durationMs: number;
   nextAttemptAt: number;

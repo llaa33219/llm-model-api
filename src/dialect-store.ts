@@ -87,12 +87,14 @@ export class DialectStore {
     endpoints: DialectRecord["endpoints"],
     durationMs: number,
     error: string | null,
+    rawEndpoints?: DialectRecord["rawEndpoints"],
   ): Promise<void> {
     const now = Date.now();
     const previous = await this.storage.get<DialectRecord>(RECORD_PREFIX + base);
     const record: DialectRecord = {
       base,
       endpoints: error === null ? endpoints : previous?.endpoints ?? endpoints,
+      rawEndpoints: error === null ? rawEndpoints : previous?.rawEndpoints ?? rawEndpoints,
       probedAt: now,
       durationMs,
       nextAttemptAt: now + (error === null ? DIALECT_TTL_MS : DIALECT_FAILURE_RETRY_MS),

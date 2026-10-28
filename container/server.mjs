@@ -59,6 +59,19 @@ export function partitionEndpoints(probes) {
   return endpoints;
 }
 
+/** Public response values are SDK base URLs from detector 0.2.0, not raw endpoints. */
+export function partitionSdkBaseUrls(result) {
+  const endpoints = { supported: {}, likely: {} };
+  for (const probe of result.probes) {
+    if (!DIALECTS.has(probe.dialect)) continue;
+    if (probe.status !== "supported" && probe.status !== "likely") continue;
+    endpoints[probe.status][probe.dialect] = result.sdkBaseUrls[probe.dialect];
+  }
+  endpoints.supported = Object.fromEntries(Object.entries(endpoints.supported).sort());
+  endpoints.likely = Object.fromEntries(Object.entries(endpoints.likely).sort());
+  return endpoints;
+}
+
 export async function probeBase(base, timeoutMs = 4000) {
   const startedAt = Date.now();
   try {
@@ -66,7 +79,8 @@ export async function probeBase(base, timeoutMs = 4000) {
     return {
       base: result.baseUrl,
       ok: true,
-      endpoints: partitionEndpoints(result.probes),
+      endpoints: partitionSdkBaseUrls(result),
+      rawEndpoints: partitionEndpoints(result.probes),
       durationMs: result.durationMs,
     };
   } catch (error) {

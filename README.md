@@ -284,10 +284,10 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
       "api": "https://api.anthropic.com",
       "dialects": {
         "supported": {
-          "anthropic-messages": "https://api.anthropic.com/v1/messages"
+          "anthropic-messages": "https://api.anthropic.com"
         },
         "likely": {
-          "openai-chat": "https://api.anthropic.com/v1/chat/completions"
+          "openai-chat": "https://api.anthropic.com"
         }
       }
     },
@@ -298,8 +298,8 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
       "dialects": {
         "supported": {},
         "likely": {
-          "openai-chat": "https://api.openai.com/v1/chat/completions",
-          "openai-responses": "https://api.openai.com/v1/responses"
+          "openai-chat": "https://api.openai.com/v1",
+          "openai-responses": "https://api.openai.com/v1"
         }
       }
     },
@@ -342,8 +342,8 @@ nothing verifiable" — never "the provider speaks no dialect". Empty
       "dialects": {
         "supported": {},
         "likely": {
-          "openai-chat": "https://api.openai.com/v1/chat/completions",
-          "openai-responses": "https://api.openai.com/v1/responses"
+          "openai-chat": "https://api.openai.com/v1",
+          "openai-responses": "https://api.openai.com/v1"
         }
       },
       "model_id": "gpt-5",
