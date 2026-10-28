@@ -33,26 +33,54 @@ export class WorkerEntrypoint { constructor(ctx, env) { this.ctx = ctx; this.env
 `);
 const { handleProvider, handleModel } = await import(path.join(out, "handlers.js"));
 const { dialectMapForModels, scheduleDialectSync, dialectCacheStatus } = await import(path.join(out, "dialects.js"));
-const { DialectStore } = await import(path.join(out, "dialect-store.js"));
+const { DialectStore, DIALECT_CACHE_SCHEMA_VERSION } = await import(path.join(out, "dialect-store.js"));
 const { DialectDetectorDurableContainer } = await import(path.join(out, "dialect-container.js"));
 
 class MemoryStorage {
-  values = new Map(); alarmAt = null;
+  values = new Map(); alarmAt = null; transactionQueue = Promise.resolve();
   async get(k) { return this.values.get(k); }
   async put(k,v) { this.values.set(k,structuredClone(v)); }
   async delete(keys) { let n=0; for(const k of keys) if(this.values.delete(k))n++; return n; }
   async list({prefix}) { return new Map([...this.values].filter(([k])=>k.startsWith(prefix))); }
   async getAlarm() { return this.alarmAt; }
   async setAlarm(at) { this.alarmAt=at; }
+  async transaction(fn) {
+    const result = this.transactionQueue.then(() => fn(this));
+    this.transactionQueue = result.catch(() => {});
+    return await result;
+  }
 }
 const storage = new MemoryStorage();
 const base="https://api.anthropic.com";
-const endpoints={supported:{"anthropic-messages":`${base}/v1/messages`},likely:{"openai-chat":`${base}/v1/chat/completions`}};
+const endpoints={supported:{"anthropic-messages":base},likely:{"openai-chat":`${base}/v1`}};
+await storage.put("dialect:meta:v2",{schemaVersion:2,source:"test",targets:[{base,providers:["anthropic"]}],activeBase:null,lastError:null,lastBatchAt:1,lastBatchDurationMs:1});
+await storage.put(`dialect:record:v2:${base}`,{base,endpoints:{supported:{"anthropic-messages":`${base}/v1/messages`},likely:{}},probedAt:1,durationMs:1,nextAttemptAt:Date.now()+86400000,error:null});
 const store = new DialectStore(storage);
-await store.configure("test",[{base,providers:["anthropic"]}]);
-await store.save(base,endpoints,1,null);
+const upgradedSnapshot = await store.snapshot();
+assert.equal(DIALECT_CACHE_SCHEMA_VERSION,3);
+assert.equal(upgradedSnapshot.records.length,0,"fresh v2 raw endpoints must not survive the SDK baseURL migration");
 const ctxContainer = { storage, container: { async setInactivityTimeout() {} }, id: { toString: () => "container-id" } };
 const container = new DialectDetectorDurableContainer(ctxContainer,{});
+// Interleave the first sync's target update with the container's first save.
+// Without a storage transaction, the completion callback restores empty targets.
+const originalGet = storage.get.bind(storage);
+let releaseConfigure;
+let configureReading = new Promise((resolve) => { releaseConfigure = resolve; });
+storage.get = async (key) => {
+  const value = await originalGet(key);
+  if (key === "dialect:meta:v3") await configureReading;
+  return value;
+};
+const concurrentConfigure = store.configure("test",[{base,providers:["anthropic"]}]);
+const concurrentSave = container.saveResults({results:[{base,ok:true,endpoints,durationMs:1}],startedAt:Date.now(),lastError:null,begin:base});
+await new Promise((resolve) => setImmediate(resolve));
+storage.get = originalGet;
+releaseConfigure();
+await Promise.all([concurrentConfigure, concurrentSave]);
+const concurrentSnapshot = await store.snapshot();
+assert.equal(concurrentSnapshot.source,"test");
+assert.equal(concurrentSnapshot.targets.length,1,"a concurrent result write must not erase configured targets");
+assert.equal(concurrentSnapshot.records[0]?.base,base);
 const stub={async getSnapshot(){return await store.snapshot();},async sync(source,targets){await store.configure(source,targets);}};
 const env={DIALECT_DETECTOR:{idFromName(name){assert.equal(name,"global");return name;},getByName(name){assert.equal(name,"global");return stub;},get(id){assert.equal(id,"global");return stub;}}};
 const model=(id,name)=>({id,name,family:"claude",attachment:true,tool_call:true,open_weights:false,reasoning:true,modalities:{input:["text"],output:["text"]},limit:{context:200000,output:64000},release_date:"2026-01-01",last_updated:"2026-01-01"});
