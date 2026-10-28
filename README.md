@@ -137,8 +137,9 @@ package running in a **singleton Cloudflare Container**. Five dialects are probe
   isolates share them and container sleep/restarts do not erase them.
   Because scheduling policy is immutable, the replacement uses a **new**
   `DialectDetectorDurableContainer` class/namespace and a separately named
-  application; the old `DialectDetectorContainer` entry is retained unchanged
-  during cutover. No old storage or container instances are migrated.
+  application. This account rejects even retained `default` application entries,
+  so only the replacement is configured. No old storage or container instances
+  are migrated; removing the config entry does not delete the old application.
 - **Container ↔ Durable Object**: `interceptOutboundHttp` sends the virtual
   `dialect-detector.internal` host to the exported `DialectResultsWorker`, which
   routes result writes back to the singleton Durable Object. No state is stored
@@ -208,8 +209,8 @@ npm --prefix container start
 
 Containers require the **Workers Paid plan**. This account permits only the
 `durable_object` scheduling policy; the replacement application is named
-`llm-model-api-dialect-detector-durable`. Keep the old application until the
-replacement is verified; deleting the old application is a separate operation.
+`llm-model-api-dialect-detector-durable`. Any old application is left untouched
+by config removal; deleting it is a separate, explicitly authorized operation.
 For a production Git integration,
 set the deploy command to `npx wrangler deploy` (or `npm run deploy`) — the
 production build must build/publish the Container image as well as the Worker.
