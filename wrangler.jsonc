@@ -32,6 +32,10 @@
     ]
   },
   "exports": {
+    "DialectDetectorContainer": {
+      "type": "durable-object",
+      "state": "deleted"
+    },
     "DialectDetectorDurableContainer": {
       "type": "durable-object",
       "storage": "sqlite"
