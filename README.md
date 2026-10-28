@@ -129,14 +129,21 @@ package running in a **singleton Cloudflare Container**. Five dialects are probe
 `openai-chat`, `openai-responses`, `anthropic-messages`, `gemini-generate`,
 `typesafe-systemone`.
 
-- **Architecture**: Worker → `getContainer()` → one singleton
-  `DialectDetectorContainer extends Container`. The documented Container class
-  owns startup, readiness and idle shutdown. The Node process runs the long
+- **Architecture**: Worker → `getByName("global")` → one singleton
+  `DialectDetectorDurableContainer extends DurableObject`. The account requires
+  the `durable_object` scheduling policy, so `ctx.container.start()` selects the
+  named image and `standard-1` size at runtime. The Node process runs the long
   detector loop. Durable Object storage owns persistent results, so all Worker
   isolates share them and container sleep/restarts do not erase them.
-- **Container ↔ Durable Object**: a virtual `dialect-detector.internal` host is
-  handled by `outboundByHost`, which routes the Node process's result writes back
-  to its own Durable Object storage. No state is stored on ephemeral container disk.
+  Because scheduling policy is immutable, the replacement uses a **new**
+  `DialectDetectorDurableContainer` class/namespace and a separately named
+  application; the old `DialectDetectorContainer` entry is retained unchanged
+  during cutover. No old storage or container instances are migrated.
+- **Container ↔ Durable Object**: `interceptOutboundHttp` sends the virtual
+  `dialect-detector.internal` host to the exported `DialectResultsWorker`, which
+  routes result writes back to the singleton Durable Object. No state is stored
+  on ephemeral container disk. The Worker is exported from `src/index.ts` so
+  `ctx.exports` can create its loopback binding.
 - **Refresh timing**: results are valid for **24 hours**; failures retry after
   5 minutes. The container's internal loop probes due URLs sequentially and
   persists each result **immediately after its probe**. A later failure or
@@ -163,7 +170,7 @@ package running in a **singleton Cloudflare Container**. Five dialects are probe
   OpenAI-shaped envelope there (no route). Many gateways genuinely are
   multi-dialect — 302.AI answers all five.
 - **Budget**: sequential probes inside one container, 4 s per-probe timeout,
-  identical base URLs deduped. `sleepAfter = "30m"` stops an idle container.
+  identical base URLs deduped. The inactivity timeout is 30 minutes.
 - **Cache compatibility**: the Durable Object uses versioned storage keys and
   records. The old module-memory flat map was not a persistent cache; it is not
   returned under the new `supported`/`likely` shape.
@@ -199,7 +206,11 @@ npm --prefix container start
 
 ### Deploy
 
-Containers require the **Workers Paid plan**. For a production Git integration,
+Containers require the **Workers Paid plan**. This account permits only the
+`durable_object` scheduling policy; the replacement application is named
+`llm-model-api-dialect-detector-durable`. Keep the old application until the
+replacement is verified; deleting the old application is a separate operation.
+For a production Git integration,
 set the deploy command to `npx wrangler deploy` (or `npm run deploy`) — the
 production build must build/publish the Container image as well as the Worker.
 The first deploy can take several minutes while the image is provisioned.
@@ -242,9 +253,9 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 │   ├── fetch.ts        # models.dev fetch + 10-min cache
 │   ├── dialects.ts     # shared snapshot reads + bounded target sync
 │   ├── dialect-targets.ts # provider base URL resolution/deduplication
-│   ├── dialect-client.ts  # getContainer singleton + RPC calls
+│   ├── dialect-client.ts  # singleton DO binding + RPC calls
 │   ├── dialect-store.ts   # persistent result records on the Container DO
-│   ├── dialect-container.ts # Container class + outboundByHost storage route
+│   ├── dialect-container.ts # direct Container API + outbound Worker route
 │   ├── match.ts        # normalize / levenshtein / similarity
 │   └── types.ts        # shared API and persistence types
 ├── container/
@@ -253,6 +264,7 @@ If you see a 525 or 526 error, the SSL certificate hasn't finished provisioning 
 │   └── package.json    # container-owned locked runtime dependency
 ├── test/               # deterministic DO/API + live Node service tests
 ├── wrangler.jsonc
+├── worker-configuration.d.ts # ctx.exports typing for the results Worker
 ├── tsconfig.json
 └── package.json
 ```

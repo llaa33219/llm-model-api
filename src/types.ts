@@ -124,5 +124,5 @@ export type DialectSnapshot = {
 };
 
 export type Env = {
-  DIALECT_DETECTOR: DurableObjectNamespace<import("./dialect-container").DialectDetectorContainer>;
+  DIALECT_DETECTOR: DurableObjectNamespace<import("./dialect-container").DialectDetectorDurableContainer>;
 };

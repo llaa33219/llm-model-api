@@ -1,10 +1,9 @@
-// The documented getContainer helper routes all isolates to one singleton.
+// All API isolates use the same named Durable Object / container instance.
 
-import { getContainer } from "@cloudflare/containers";
 import type { DialectSnapshot, DialectTarget, Env } from "./types";
 
 export async function getDialectSnapshot(env: Env): Promise<DialectSnapshot> {
-  return await getContainer(env.DIALECT_DETECTOR).getSnapshot();
+  return await env.DIALECT_DETECTOR.getByName("global").getSnapshot();
 }
 
 export async function syncDialectDetector(
@@ -12,5 +11,5 @@ export async function syncDialectDetector(
   source: string,
   targets: DialectTarget[],
 ): Promise<void> {
-  await getContainer(env.DIALECT_DETECTOR).sync(source, targets);
+  await env.DIALECT_DETECTOR.getByName("global").sync(source, targets);
 }

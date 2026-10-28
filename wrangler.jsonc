@@ -17,18 +17,32 @@
       "image": "./container/Dockerfile",
       "instance_type": "standard-1",
       "max_instances": 1
+    },
+    {
+      "name": "llm-model-api-dialect-detector-durable",
+      "class_name": "DialectDetectorDurableContainer",
+      "scheduling_policy": "durable_object",
+      "images": {
+        "base": {
+          "dockerfile": "./container/Dockerfile"
+        }
+      }
     }
   ],
   "durable_objects": {
     "bindings": [
       {
         "name": "DIALECT_DETECTOR",
-        "class_name": "DialectDetectorContainer"
+        "class_name": "DialectDetectorDurableContainer"
       }
     ]
   },
   "exports": {
     "DialectDetectorContainer": {
+      "type": "durable-object",
+      "storage": "sqlite"
+    },
+    "DialectDetectorDurableContainer": {
       "type": "durable-object",
       "storage": "sqlite"
     }

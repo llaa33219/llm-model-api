@@ -1,7 +1,7 @@
-// Documented Container-class integration for the default scheduling policy.
-// Lifecycle, startup and port readiness are handled by @cloudflare/containers.
+// Direct Durable Object Container API, required by this account's
+// durable_object scheduling policy. The image and size are selected here.
 
-import { Container } from "@cloudflare/containers";
+import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
 import { DialectStore } from "./dialect-store";
 import type {
   DialectRecord,
@@ -18,29 +18,87 @@ export interface ProbeResult {
   error?: string;
 }
 
-export class DialectDetectorContainer extends Container<Env> {
-  // Container -> virtual host -> this same Durable Object. This is the
-  // documented way for a container to use a binding / its DO state.
-  static {
-    // The base class registers handlers through its static setter. A class
-    // field would shadow that setter without invoking it (ES2022 semantics).
-    this.outboundByHost = {
-      "dialect-detector.internal": async (
-        request: Request,
-        env: Env,
-        ctx: { containerId: string },
-      ): Promise<Response> => {
-        const id = env.DIALECT_DETECTOR.idFromString(ctx.containerId);
-        return await env.DIALECT_DETECTOR.get(id).fetch(request);
-      },
-    };
+/** Receives the Node process's internal virtual-host requests. */
+export class DialectResultsWorker extends WorkerEntrypoint<Env, { id: string }> {
+  override async fetch(request: Request): Promise<Response> {
+    const id = this.env.DIALECT_DETECTOR.idFromString(this.ctx.props.id);
+    return await this.env.DIALECT_DETECTOR.get(id).fetch(request);
+  }
+}
+
+const PORT = 8080;
+const INACTIVITY_TIMEOUT_MS = 30 * 60 * 1000;
+const READY_ATTEMPTS = 100;
+const READY_INTERVAL_MS = 200;
+
+export class DialectDetectorDurableContainer extends DurableObject<Env> {
+  private starting: Promise<void> | undefined;
+  private configuring: Promise<void> | undefined;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    if (ctx.container?.running) {
+      this.configuring = ctx.blockConcurrencyWhile(() => this.configureContainer());
+    }
   }
 
-  defaultPort = 8080;
-  sleepAfter = "30m";
-  enableInternet = true;
+  private async configureContainer(): Promise<void> {
+    const container = this.ctx.container;
+    if (!container) throw new Error("No container configured for DialectDetectorDurableContainer");
+    const resultsWorker = this.ctx.exports.DialectResultsWorker({
+      props: { id: this.ctx.id.toString() },
+    }) as Fetcher;
+    // Intercepts last until this container stops; re-registering the same
+    // host replaces its handler, so running containers stay up to date.
+    await container.interceptOutboundHttp("dialect-detector.internal", resultsWorker);
+    await container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+  }
 
-  override async fetch(request: Request): Promise<Response> {
+  private async startAndWaitForPort(): Promise<void> {
+    const container = this.ctx.container;
+    if (!container) throw new Error("No container configured for DialectDetectorDurableContainer");
+    if (!container.running) {
+      await this.configureContainer();
+      container.start({
+        image: container.images.base,
+        instance: "standard-1",
+        enableInternet: true,
+      });
+    } else {
+      await this.configureContainer();
+    }
+    const port = container.getTcpPort(PORT);
+    let lastError: unknown;
+    for (let attempt = 0; attempt < READY_ATTEMPTS; attempt++) {
+      try {
+        const response = await port.fetch("http://container/health", {
+          signal: AbortSignal.timeout(1000),
+        });
+        await response.body?.cancel();
+        if (!response.ok) throw new Error(`Health check returned ${response.status}`);
+        return;
+      } catch (error) {
+        lastError = error;
+        await scheduler.wait(READY_INTERVAL_MS);
+      }
+    }
+    throw new Error("Container did not become ready on port 8080", { cause: lastError });
+  }
+
+  /** Calls from container control and result writes share one startup path. */
+  private async containerFetch(path: string, init?: RequestInit): Promise<Response> {
+    if (this.configuring) await this.configuring;
+    this.starting ??= this.startAndWaitForPort().finally(() => {
+      this.starting = undefined;
+    });
+    await this.starting;
+    return await this.ctx.container!.getTcpPort(PORT).fetch(
+      `http://container${path}`,
+      init,
+    );
+  }
+
+  async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const store = new DialectStore(this.ctx.storage);
     if (request.method === "GET" && url.pathname === "/state") {
@@ -52,29 +110,14 @@ export class DialectDetectorContainer extends Container<Env> {
         if (typeof body.source !== "string" || !Array.isArray(body.targets)) {
           return Response.json({ error: "Expected source and targets" }, { status: 400 });
         }
-        await store.configure(body.source, body.targets);
-        // Let the library start/wait for the process; do not hand-roll start().
-        const control = await this.containerFetch("http://container/control", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(body),
-        });
-        if (!control.ok) {
-          return Response.json(
-            { error: `Container control failed: ${await control.text()}` },
-            { status: 502 },
-          );
-        }
+        await this.sync(body.source, body.targets);
         return Response.json(await store.snapshot());
       } catch (error) {
-        return Response.json(
-          { error: error instanceof Error ? error.message : String(error) },
-          { status: 400 },
-        );
+        return Response.json({ error: error instanceof Error ? error.message : String(error) }, { status: 400 });
       }
     }
     if (request.method === "POST" && url.pathname === "/stop") {
-      return await this.containerFetch("http://container/stop", { method: "POST" });
+      return await this.containerFetch("/stop", { method: "POST" });
     }
     if (request.method === "POST" && url.pathname === "/results") {
       return await this.saveResults(await request.json());
@@ -88,7 +131,7 @@ export class DialectDetectorContainer extends Container<Env> {
 
   async sync(source: string, targets: DialectTarget[]): Promise<void> {
     await new DialectStore(this.ctx.storage).configure(source, targets);
-    const response = await this.containerFetch("http://container/control", {
+    const response = await this.containerFetch("/control", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ source, targets }),
@@ -102,7 +145,11 @@ export class DialectDetectorContainer extends Container<Env> {
     lastError: string | null;
     begin?: string;
   }): Promise<Response> {
-    this.renewActivityTimeout();
+    // Each result counts as activity, so the container stays alive while its
+    // internal long-running pass is making progress.
+    if (this.ctx.container) {
+      await this.ctx.container.setInactivityTimeout(INACTIVITY_TIMEOUT_MS);
+    }
     const store = new DialectStore(this.ctx.storage);
     if (body.begin) await store.beginPass(body.begin);
     for (const result of body.results) {
