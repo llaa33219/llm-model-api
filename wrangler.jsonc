@@ -14,7 +14,6 @@
   "containers": [
     {
       "name": "llm-model-api-dialect-detector-durable",
-      "class_name": "DialectDetectorDurableContainer",
       "scheduling_policy": "durable_object",
       "images": {
         "base": {
@@ -38,7 +37,8 @@
     },
     "DialectDetectorDurableContainer": {
       "type": "durable-object",
-      "storage": "sqlite"
+      "storage": "sqlite",
+      "container": "llm-model-api-dialect-detector-durable"
     }
   },
   "routes": [
